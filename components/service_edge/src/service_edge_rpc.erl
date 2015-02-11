@@ -165,27 +165,39 @@ handle_remote_message(ServiceName, Timeout, Parameters, Signature, Certificate) 
 %%
 %% 
 
-flatten_ws_args([ { Key, [{ struct, List}] } | T], Acc )  when is_list(List) ->
-    flatten_ws_args([ {Key, List} | T], Acc);
+flatten_ws_args([{ struct, List} | T], Acc )  when is_list(List) ->
+    flatten_ws_args( List ++ T, Acc);
 
-flatten_ws_args({ Key, Val}, Acc ) ->
-    flatten_ws_args([], [ {Key, Val} | Acc]);
 
 flatten_ws_args([{ Key, Val}| T], Acc ) ->
-    flatten_ws_args(T, [ {Key, Val}  | Acc]);
+    NKey = case is_atom(Key) of
+	       true -> atom_to_list(Key);
+	       false -> Key
+	   end,
 
+    NVal = flatten_ws_args(Val),
+
+    flatten_ws_args(T, [ NKey, NVal] ++ Acc);
 
 flatten_ws_args([], Acc) -> 
-    lists:reverse(Acc).
+    Acc;
+    
+
+flatten_ws_args(Other, []) ->
+    Other;
+
+flatten_ws_args(Other, Acc) ->
+    [ Other | Acc ].
 
 
 flatten_ws_args(Args) ->    
     flatten_ws_args(Args, []).
     
-dispatch_to_local_service([ $w, $s, $: | WSPidStr], Command, Args) ->
+dispatch_to_local_service([ $w, $s, $: | WSPidStr], Command, 
+			 [{ service_name, SvcName}, { parameters, Args}] ) ->
     ?debug("service_edge:dispatch_to_local_service(): Websocket!: ~p, ~p", [ Command, Args]),
     wse:call(list_to_pid(WSPidStr), wse:window(),
-	     Command, flatten_ws_args(Args)),
+	     Command,  [ "service_name", SvcName ] ++ flatten_ws_args(Args)),
     ok;
 
 %% Dispatch to regular JSON-RPC over HTTP.
