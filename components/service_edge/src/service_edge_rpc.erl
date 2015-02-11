@@ -12,7 +12,8 @@
 
 -export([handle_rpc/2]).
 -export([wse_register_service/2]).
--export([wse_message/5]).
+-export([wse_message/5, flatten_ws_args/1]).
+
 -export([init/0]).
 
 %%-include_lib("lhttpc/include/lhttpc.hrl").
@@ -162,12 +163,16 @@ handle_remote_message(ServiceName, Timeout, Parameters, Signature, Certificate) 
 %%        different dispatchers are triggered depending
 %%        on prefix in NetworkAddress
 %%
+%% 
 
-flatten_ws_args([ { _, [{ struct, List}] } | T], Acc )  when is_list(List) ->
-    flatten_ws_args(List ++ T, Acc);
+flatten_ws_args([ { Key, [{ struct, List}] } | T], Acc )  when is_list(List) ->
+    flatten_ws_args([ {Key, List} | T], Acc);
 
-flatten_ws_args([{ _, Val}| T], Acc ) ->
-    flatten_ws_args(T, [ Val | Acc]);
+flatten_ws_args({ Key, Val}, Acc ) ->
+    flatten_ws_args([], [ {Key, Val} | Acc]);
+
+flatten_ws_args([{ Key, Val}| T], Acc ) ->
+    flatten_ws_args(T, [ {Key, Val}  | Acc]);
 
 
 flatten_ws_args([], Acc) -> 
