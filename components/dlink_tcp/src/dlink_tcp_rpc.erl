@@ -710,7 +710,7 @@ handle_info({ rvi_ping, Pid, Address, Port, Timeout},  St) ->
     {noreply, St};
 
 %% Setup static nodes
-handle_info({ rvi_setup_persitent_connection, IP, Port, CompSpec }, St) ->
+handle_info({ rvi_setup_persistent_connection, IP, Port, CompSpec }, St) ->
     connect_and_retry_remote(IP, Port, CompSpec),
     { noreply, St };
 
@@ -726,7 +726,7 @@ code_change(_OldVsn, St, _Extra) ->
 
 setup_reconnect_timer(MSec, IP, Port, CompSpec) ->
     erlang:send_after(MSec, ?MODULE, 
-		      { rvi_setup_persitent_connection, 
+		      { rvi_setup_persistent_connection, 
 			IP, Port, CompSpec }),
     ok.
 
