@@ -36,24 +36,34 @@ init([]) ->
     {ok, #st { listeners = [] }}.
 
 
-handle_call({add_listener, Channel}, _From, State) ->
+handle_call({add_listener, Channel}, _From, St) ->
     ?info("bt_listener:add_listener(): Setting up listener on channel ~p", [ Channel]),
 
     case rfcomm:listen(Channel) of
         {ok, ListenRef} ->
 	    ?info("bt_listener:add_listener(): ListenRef: ~p", [ ListenRef]),
-	    { noreply, NSt} = handle_info({accept, ListenRef, Channel, ok}, State),
+	    {ok, ConnPid} = bt_connection:accept(Channel, 
+						 ListenRef, 
+						 self(), 
+						 dlink_bt_rpc, 
+						 handle_socket, 
+						 nil),
+
+    
+
+     	    %%{ noreply, NSt} = handle_info({accept, ListenRef, Channel, ok}, St),
 
 	    { reply, 
 	      ok, 
-	      NSt#st { 
-		listeners = [ { ListenRef, Channel } | NSt#st.listeners ]
+	      St#st { 
+		acceptors = [ { Channel, ConnPid } | St#st.acceptors ],
+		listeners = [ { ListenRef, Channel } | St#st.listeners ]
 	       }
 	    };
 
 	Err ->
 	    ?info("bt_listener:add_listener(): Failed: ~p", [ Err]),
-	    {reply, Err, State}
+	    {reply, Err, St}
 
     end;
 
@@ -71,18 +81,21 @@ handle_info({accept, ListenRef, Channel, ok} , St) ->
     %% Fire up a new process to handle the
     %% future incoming connection.
     ?info("bt_listener:accept(): ListenRef: ~p", [ ListenRef]),
-
-    {ok, ConnPid} = bt_connection:accept(Channel, 
-					 ListenRef, 
-					 self(), 
-					 dlink_bt_rpc, 
-					 handle_socket, 
-					 nil),
+    
+    %% Must fix multiple acceptors in bt_linux_drv.c
+    %% {ok, ConnPid} = bt_connection:accept(Channel, 
+    %%  					 ListenRef, 
+    %%  					 self(), 
+    %%  					 dlink_bt_rpc, 
+    %% 					 handle_socket, 
+    %%  					 nil),
 
     
-    {noreply, St#st {acceptors = [ { Channel, ConnPid } | St#st.acceptors ]}};
+    %% {noreply, St#st {acceptors = [ { Channel, ConnPid } | St#st.acceptors ]}};
+    {noreply, St };
 
 handle_info(_Msg, State) ->
+    ?info("bt_listener:handle_info(): Unknown: ~p", [ _Msg]),
     
     {noreply, State}.
 

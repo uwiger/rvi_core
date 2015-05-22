@@ -226,8 +226,9 @@ handle_cast(_Msg, State) ->
 
 %% An accept reference we've setup now has accetpted an
 %% incoming connection.
-handle_info({ARef, {accept, BTAddr, Channel} }, 
+handle_info({rfcomm, ARef, { accept, BTAddr, _ } }, 
 	    #st { rfcomm_ref = ConnRef, 
+		  channel = Channel,
 		  parent_pid = PPid } = St) 
   when ConnRef =:= ARef ->
     io:format("bt_connection from ~w:~w\n", [BTAddr,Channel]),
@@ -235,18 +236,18 @@ handle_info({ARef, {accept, BTAddr, Channel} },
     { noreply, St#st { remote_addr = BTAddr, 
 		       channel = Channel } };
 
-handle_info({tcp, _ConnRef, Data}, 
+handle_info({rfcomm, _ConnRef, {data, Data}}, 
 	    #st { remote_addr = BTAddr,
 		  channel = Channel,
 		  mod = Mod,
 		  func = Fun,
 		  args = Arg } = State) ->
     ?debug("~p:handle_info(data): Data: ~p", [ ?MODULE, Data]),
-    ?debug("~p:handle_info(data): From: ~p:~p ", [ ?MODULE, BTAddr, Channel]),
+    ?info("~p:handle_info(data): From: ~p:~p ", [ ?MODULE, BTAddr, Channel]),
 
     try binary_to_term(Data) of
 	Term ->
-	    ?debug("~p:handle_info(data): Term: ~p", [ ?MODULE, Term]),
+	    ?info("~p:handle_info(data): Term: ~p", [ ?MODULE, Term]),
 	    FromPid = self(),
 	    spawn(fun() -> Mod:Fun(FromPid, BTAddr, Channel, 
 				   data, Term, Arg) end)
