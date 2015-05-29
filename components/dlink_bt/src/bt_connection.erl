@@ -70,7 +70,7 @@ send(Pid, Data) when is_pid(Pid) ->
     gen_server:cast(Pid, {send, Data}).
     
 send(Addr, Channel, Data) ->
-    case connection_manager:find_connection_by_address(Addr, Channel) of
+    case bt_connection_manager:find_connection_by_address(Addr, Channel) of
 	{ok, Pid} ->
 	    gen_server:cast(Pid, {send, Data});
 
@@ -85,7 +85,7 @@ terminate_connection(Pid) when is_pid(Pid) ->
     gen_server:call(Pid, terminate_connection).
     
 terminate_connection(Addr, Channel) ->
-    case connection_manager:find_connection_by_address(Addr, Channel) of
+    case bt_connection_manager:find_connection_by_address(Addr, Channel) of
 	{ok, Pid} ->
 	    gen_server:call(Pid, terminate_connection);
 
@@ -97,7 +97,7 @@ is_connection_up(Pid) when is_pid(Pid) ->
     is_process_alive(Pid).
 
 is_connection_up(Addr, Channel) ->
-    case connection_manager:find_connection_by_address(Addr, Channel) of
+    case bt_connection_manager:find_connection_by_address(Addr, Channel) of
 	{ok, Pid} ->
 	    is_connection_up(Pid);
 
@@ -124,15 +124,15 @@ is_connection_up(Addr, Channel) ->
 %% When data is received, a separate process is spawned to handle
 %% the MFA invocation.
 init({connect, BTAddr, Channel, ConnRef, Mod, Fun, Arg}) ->
-    connection_manager:add_connection(BTAddr, Channel, self()),
+    bt_connection_manager:add_connection(BTAddr, Channel, self()),
 
-    ?debug("connection:init(): self():   ~p", [self()]),
-    ?debug("connection:init(): BTAddr:   ~p", [BTAddr]),
-    ?debug("connection:init(): Channel:  ~p", [Channel]),
-    ?debug("connection:init(): Ref:      ~p", [ConnRef]),
-    ?debug("connection:init(): Module:   ~p", [Mod]),
-    ?debug("connection:init(): Function: ~p", [Fun]),
-    ?debug("connection:init(): Arg:      ~p", [Arg]),
+    ?debug("bt_connection:init(): self():   ~p", [self()]),
+    ?debug("bt_connection:init(): BTAddr:   ~p", [BTAddr]),
+    ?debug("bt_connection:init(): Channel:  ~p", [Channel]),
+    ?debug("bt_connection:init(): Ref:      ~p", [ConnRef]),
+    ?debug("bt_connection:init(): Module:   ~p", [Mod]),
+    ?debug("bt_connection:init(): Function: ~p", [Fun]),
+    ?debug("bt_connection:init(): Arg:      ~p", [Arg]),
 
     %% Grab socket control
     {ok, #st{
@@ -205,7 +205,7 @@ handle_cast({send, Data},  St) ->
     ?debug("~p:handle_call(send): Sending: ~p", 
 	     [ ?MODULE, Data]),
 
-%%    gen_tcp:send(St#st.sock, term_to_binary(Data)),
+    rfcomm:send(St#st.rfcomm_ref, Data),
 
     {noreply, St};
 
@@ -269,7 +269,7 @@ handle_info({rfcomm_closed, ConnRef},
 		  args = Arg } = State) ->
     ?debug("~p:handle_info(tcp_closed): BTAddr: ~p:~p ", [ ?MODULE, BTAddr, Channel]),
     Mod:Fun(self(), BTAddr, Channel, closed, Arg),
-    connection_manager:delete_connection_by_pid(self()),
+    bt_connection_manager:delete_connection_by_pid(self()),
     rfcomm_close:close(ConnRef),
     {stop, normal, State};
 
@@ -284,7 +284,7 @@ handle_info({rfcomm_error, ConnRef},
     ?debug("~p:handle_info(tcp_error): BTAddr: ~p:~p ", [ ?MODULE, BTAddr, Channel]),
     Mod:Fun(self(), BTAddr, Channel, error, Arg),
     rfcomm:close(ConnRef),
-    connection_manager:delete_connection_by_pid(self()),
+    bt_connection_manager:delete_connection_by_pid(self()),
     {stop, normal, State};
 
 
