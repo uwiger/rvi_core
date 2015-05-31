@@ -11,7 +11,7 @@
 -module(bt_listener).
 
 -include_lib("lager/include/log.hrl").
-
+-include_lib("rvi_common/include/rvi_common.hrl").
 -export([start_link/0,
          add_listener/1,
          remove_listener/1]).
@@ -20,7 +20,9 @@
 -export([terminate/2]).
 
 -record(st, {listeners = [],
-	     acceptors = []}).
+	     acceptors = [],
+	     cs = #component_spec{}
+	    }).
 
 
 start_link() ->
@@ -33,7 +35,13 @@ remove_listener(Channel) ->
     gen_server:call(?MODULE, {remove_listener, Channel}).
 
 init([]) ->
-    {ok, #st { listeners = [] }}.
+
+    {ok, #st { 
+	    listeners = [], 
+	    acceptors = [],
+	    cs = rvi_common:get_component_specification()
+	   }
+    }.
 
 
 handle_call({add_listener, Channel}, _From, St) ->
@@ -44,10 +52,9 @@ handle_call({add_listener, Channel}, _From, St) ->
 	    ?info("bt_listener:add_listener(): ListenRef: ~p", [ ListenRef]),
 	    {ok, ConnPid} = bt_connection:accept(Channel, 
 						 ListenRef, 
-						 self(), 
 						 dlink_bt_rpc, 
 						 handle_socket, 
-						 nil),
+						 St#st.cs),
 
     
 
@@ -77,18 +84,18 @@ handle_call(_Msg, _From, State) ->
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
-handle_info({accept, ListenRef, Channel, ok} , St) ->
+handle_info({accept, ListenRef, BTAddr, Channel, ok} , St) ->
     %% Fire up a new process to handle the
     %% future incoming connection.
     ?info("bt_listener:accept(): ListenRef: ~p", [ ListenRef]),
+    ?info("bt_listener:accept(): Remote: ~p-~p", [BTAddr, Channel ]),
     
     %% Must fix multiple acceptors in bt_linux_drv.c
     %% {ok, ConnPid} = bt_connection:accept(Channel, 
     %%  					 ListenRef, 
-    %%  					 self(), 
     %%  					 dlink_bt_rpc, 
     %% 					 handle_socket, 
-    %%  					 nil),
+    %%  					 []),
 
     
     %% {noreply, St#st {acceptors = [ { Channel, ConnPid } | St#st.acceptors ]}};
