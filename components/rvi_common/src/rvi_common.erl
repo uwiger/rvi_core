@@ -19,7 +19,6 @@
 -export([request/6]).
 -export([notification/5]).
 -export([json_rpc_status/1]).
--export([proplist_to_json/1]).
 -export([get_json_element/2]).
 -export([sanitize_service_string/1]).
 -export([local_service_to_string/1]).
@@ -143,14 +142,6 @@ get_request_result(ok)->
 get_request_result(Other)->
     ?error("get_request_result(): Unhandled result: ~p", [Other]),    
     { error, format }.
-
-
-proplist_to_json(InArgPropList) ->
-    %% Split [ { network_address, "127.0.0.1:888" } , { timeout, 34 } ] to
-    %% [ "127.0.0.1:888", 34] [ network_address, timeout ] 
-    InArg = [ Val || { _Key, Val } <- InArgPropList ],
-    InArgSpec = [ Key || { Key, _Val } <- InArgPropList ],
-    json_argument(InArg, InArgSpec).
 
 
 json_argument([], [], Acc) ->

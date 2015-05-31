@@ -243,7 +243,6 @@ connect_and_retry_remote( BTAddr, Channel, CompSpec) ->
     end.
 
 
-    
 announce_local_service_(_CompSpec, [], _Service, _Availability) ->
     ok;
 
@@ -252,14 +251,8 @@ announce_local_service_(CompSpec,
 			Service, Availability) ->
     
     Res = bt_connection:send(ConnPid, 
-			     rvi_common:proplist_to_json(
-			       [ { tid, 3 },
-				 { cmd, case Availability of 
-					   availabile ->  "sa"; %% Service available
-					    _ -> "su"            %% Service unavailable
-					end },
-				 { svc, Service },
-				 { sig, "" }])),
+			     term_to_binary({service_announce, 3, Availability, 
+					     [Service], { signature, {}}})),
 
     ?debug("dlink_bt:announce_local_service(~p: ~p) -> ~p  Res: ~p", 
 	   [ Availability, Service, ConnPid, Res]),
