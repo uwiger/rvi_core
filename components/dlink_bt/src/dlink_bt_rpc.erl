@@ -385,19 +385,20 @@ handle_socket(FromPid, PeerBTAddr, PeerChannel, data,
 
     try binary_to_term(Data) of
 	{ authorize, TransactionID, RemoteAddress, RemoteChannel, 
-	  Protocol, Certificate, Signature}  -> 
+	  RVIProtocol, Certificate, Signature}  -> 
 	    process_authorize(FromPid, PeerBTAddr, RemoteChannel,
 			     TransactionID, RemoteAddress, RemoteChannel, 
-			     Protocol,  Certificate, Signature, CompSpec);
+			     RVIProtocol,  Certificate, Signature, CompSpec);
 
 	{ service_announce, TransactionID, Available, Services, Signature } ->
 	    process_announce(FromPid, PeerBTAddr, PeerChannel,
-			    TransactionID, Available, Services, 
-			    Signature, CompSpec);
+			     TransactionID, Available, Services, 
+			     Signature, CompSpec);
 
-	{ receive_data, ProtocolMod, Data } ->
+	{ receive_data, ProtocolMod, Payload } ->
 	    process_data(FromPid, PeerBTAddr, PeerChannel, 
-			ProtocolMod, Data, CompSpec);
+			ProtocolMod, Payload, CompSpec);
+
 	ping ->
 	    ?info("dlink_bt:ping(): Pinged from: ~p:~p", [ PeerBTAddr, PeerChannel]),
 	    ok;
