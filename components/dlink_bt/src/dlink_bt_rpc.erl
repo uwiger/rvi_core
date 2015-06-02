@@ -420,8 +420,8 @@ handle_socket(FromPid, PeerBTAddr, PeerChannel, data,
 				     TransactionID, Available, Services, 
 				     Signature, CompSpec);
 	"receive_data" ->
-	    [ _TransactionID, ProtocolMod, Payload ] = 
-		opts(["tid", "proto_mod", "paylaod"],
+	    [ _TransactionID, ProtocolMod, {array,Payload} ] = 
+		opts(["tid", "proto_mod", "payload"],
 		     Elems, undefined),
 	    process_data(FromPid, PeerBTAddr, PeerChannel,
 			 ProtocolMod, Payload, CompSpec);
@@ -640,9 +640,9 @@ handle_call({rvi, send_data, [ProtoMod, Service, Data, _DataLinkOpts]}, _From, S
 		       term_to_json(
 			 {struct, 		     
 			  [ { "tid", 1 },
-			    { "cmd", "receive_ddata" },
+			    { "cmd", "receive_data" },
 			    { "proto_mod", ProtoMod },
-			    { "payload",  Data }
+			    { "payload",  {array, Data }}
 			  ]})),
 				     
 	    { reply, [ Res ], St}

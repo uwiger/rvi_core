@@ -131,7 +131,7 @@ handle_call({rvi, send_message,
 			  [
 			   { "service", ServiceName },
 			   { "timeout", Timeout }, 
-			   { "parameters", Parameters },
+			   { "parameters", {array, Parameters} },
 			   { "signature", Signature },
 			   { "certificate", Certificate }]}),
 
@@ -151,7 +151,7 @@ handle_cast({rvi, receive_message, [Data]}, St) when is_list(Data)->
 handle_cast({rvi, receive_message, [Payload]}, St) ->
     {ok, {struct, Elems}} = exo_json:decode_string(binary_to_list(Payload)),
 
-    [ ServiceName, Timeout, Parameters, Signature, Certificate ] = 
+    [ ServiceName, Timeout, {array, Parameters}, Signature, Certificate ] = 
 	opts(["service", "timeout", "parameters", 
 	      "signature", "certificate"], Elems, undefined),
 
