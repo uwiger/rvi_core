@@ -389,7 +389,7 @@ process_authorize(FromPid,
 			    { "signature", "" } ]})),
 
     %% Setup ping interval
-    gen_server:call(?SERVER, { setup_initial_ping, RemoteAddress, RemoteChannel, FromPid }),
+    gen_server:call(?SERVER, { setup_initial_ping, PeerBTChannel, RemoteChannel, FromPid }),
     ok.
 
 
@@ -404,7 +404,7 @@ handle_socket(FromPid, PeerBTAddr, PeerChannel, data,
 	"authorize" ->
 	    [ TransactionID, RemoteAddress, RemoteChannel, 
 	      RVIProtocol, Certificate, Signature ] = 
-		opts(["tid", "address", "channel", "rvi_proto", 
+		opts(["tid", "addr", "channel", "rvi_proto", 
 		      "certificate", "signature"], Elems, undefined),
 
 	    process_authorize(FromPid, PeerBTAddr, RemoteChannel,
@@ -434,35 +434,6 @@ handle_socket(FromPid, PeerBTAddr, PeerChannel, data,
 	    ?warning("dlink_bt:data() cmd undefined., ~p", [ Elems ]),
 	    ok
     end.
-	
-    %% try binary_to_term(Data) of
-    %% 	{ authorize, TransactionID, RemoteAddress, RemoteChannel, 
-    %% 	  RVIProtocol, Certificate, Signature}  -> 
-
-    %% 	{ service_announce, TransactionID, Available, Services, Signature } ->
-    %% 	    process_announce(FromPid, PeerBTAddr, PeerChannel,
-    %% 			     TransactionID, Available, Services, 
-    %% 			     Signature, CompSpec);
-
-    %% 	{ receive_data, ProtocolMod, Payload } ->
-    %% 	    process_data(FromPid, PeerBTAddr, PeerChannel, 
-    %% 			ProtocolMod, Payload, CompSpec);
-
-    %% 	ping ->
-    %% 	    ?info("dlink_bt:ping(): Pinged from: ~p:~p", [ PeerBTAddr, PeerChannel]),
-    %% 	    ok;
-
-    %% 	Unknown ->
-    %% 	    ?warning("dlink_bt:handle_socket(): Unknown data: ~p", [ Unknown]),
-    %% 	    ok
-    %% catch
-    %% 	_:_ ->
-    %% 	    ?warning("dlink_bt:handle_socket(data): Data could not be decoded: ~p", 
-    %% 		     [ Data]),
-    %% 	    ok
-
-    %% end.
-
 
 
 %% We lost the socket connection.
@@ -708,7 +679,7 @@ handle_info({ rvi_ping, Pid, Address, Channel, Timeout},  St) ->
     case bt_connection:is_connection_up(Pid) of
 	true ->
 	    ?info("dlink_bt:ping(): Pinging: ~p:~p", [Address, Channel]),
-	    bt_connection:send(Pid,{ struct, [ { "cmd", "ping" }]}),
+	    bt_connection:send(Pid, term_to_json({ struct, [ { "cmd", "ping" }]})),
 
 	    erlang:send_after(Timeout, self(), 
 			      { rvi_ping, Pid, Address, Channel, Timeout });
