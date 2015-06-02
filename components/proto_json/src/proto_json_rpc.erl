@@ -133,7 +133,9 @@ handle_call({rvi, send_message,
 			   { "timeout", Timeout }, 
 			   { "parameters", {array, Parameters} },
 			   { "signature", Signature },
-			   { "certificate", Certificate }]}),
+			   { "certificate", Certificate }
+			  ]
+			}),
 
     Res = DataLinkMod:send_data(St#st.cs, ?MODULE, ServiceName, DataLinkOpts, Data),
 
