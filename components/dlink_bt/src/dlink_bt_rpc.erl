@@ -251,14 +251,19 @@ announce_local_service_(CompSpec,
 			[ConnPid | T],
 			Service, Availability) ->
     
+    Status = case Availability of
+		 available -> "av";
+		 unavailable -> "un"
+	     end,
+
     Res = bt_connection:send(ConnPid, 
 			     term_to_json(
 			       { struct, 
 				 [
 				  { "cmd", "service_announce" },
 				  { "tid", 3},
-				  { "status", atom_to_list(Availability) },
-				  { "services", { array, [Service]} },
+				  { "stat", atom_to_list(Status) },
+				  { "svcs", { array, [Service]} },
 				  { "signature", "" }
 				 ]
 			       })),
