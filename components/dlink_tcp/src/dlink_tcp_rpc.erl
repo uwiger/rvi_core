@@ -256,8 +256,8 @@ announce_local_service_(CompSpec,
 		       term_to_json(
 			 {struct, 		     
 			  [ { ?DLINK_ARG_TRANSACTION_ID, 1 },
-			    { ?DLINK_ARG_CMD, ?DLINK_CMD_SERVICE_AVAILABLE },
-			    { ?DLINK_ARG_STATUS, Status }, %% "av"avilable | "un"available
+			    { ?DLINK_ARG_CMD, ?DLINK_CMD_SERVICE_ANNOUNCE },
+			    { ?DLINK_ARG_STATUS, Status },
 			    { ?DLINK_ARG_SERVICES, { array, [ Service ] }},
 			    { ?DLINK_ARG_SIGNATURE, "" } ]})),
 
@@ -328,7 +328,7 @@ process_authorize(FromPid,
 				       { ?DLINK_ARG_CMD, ?DLINK_CMD_AUTHORIZE },
 				       { ?DLINK_ARG_ADDRESS, LocalAddress},
 				       { ?DLINK_ARG_PORT,  LocalPort },
-				       { ?DLINK_ARG_VERSION, ?DLINK_TCP_VERSION }, %% Protocol version
+				       { ?DLINK_ARG_VERSION, ?DLINK_TCP_VERSION },
 				       { ?DLINK_ARG_CERTIFICATE, "" },
 				       { ?DLINK_ARG_SIGNATURE, "" } ]})),
 	    ?debug("dlink_tcp:authorize(): Sending authorize: ~p", [ Res]),
@@ -349,8 +349,8 @@ process_authorize(FromPid,
 		       term_to_json(
 			 {struct, 		     
 			  [ { ?DLINK_ARG_TRANSACTION_ID, 1 },
-			    { ?DLINK_ARG_CMD, ?DLINK_CMD_SERVICE_AVAILABLE }, %% "s"service "a"nnounce
-			    { ?DLINK_ARG_STATUS, ?DLINK_ARG_AVAILABLE }, %% "av"avilable
+			    { ?DLINK_ARG_CMD, ?DLINK_CMD_SERVICE_ANNOUNCE }, 
+			    { ?DLINK_ARG_STATUS, ?DLINK_ARG_AVAILABLE },
 			    { ?DLINK_ARG_SERVICES, { array, LocalServices }},
 			    { ?DLINK_ARG_SIGNATURE, "" } ]})),
 
@@ -363,7 +363,7 @@ process_announce(FromPid,
 		 RemoteIP, 
 		 RemotePort, 
 		 TransactionID,
-		 ?DLINK_ARG_AVAILABLE,  %% Available
+		 ?DLINK_ARG_AVAILABLE, 
 		 Services,
 		 Signature,
 		 CompSpec) ->
@@ -384,7 +384,7 @@ process_announce(FromPid,
 		 RemoteIP, 
 		 RemotePort, 
 		 TransactionID,
-		 ?DLINK_ARG_UNAVAILABLE,  %% Unavailable
+		 ?DLINK_ARG_UNAVAILABLE,  
 		 Services,
 		 Signature,
 		 CompSpec) ->
@@ -474,26 +474,45 @@ handle_socket(FromPid, PeerIP, PeerPort, data, Payload, [CompSpec]) ->
 
     case opt(?DLINK_ARG_CMD, Elems, undefined) of
 	?DLINK_CMD_AUTHORIZE ->
-	    [ TransactionID, RemoteAddress, RemotePort, 
-	      ProtoVersion, Certificate, Signature ] = 
-		opts([?DLINK_ARG_TRANSACTION_ID, ?DLINK_ARG_ADDRESS, ?DLINK_ARG_PORT, ?DLINK_ARG_VERSION, 
-		      ?DLINK_ARG_CERTIFICATE, ?DLINK_ARG_SIGNATURE], Elems, undefined),
+	    [ TransactionID, 
+	      RemoteAddress, 
+	      RemotePort, 
+	      ProtoVersion, 
+	      Certificate, 
+	      Signature ] = 
+		opts([?DLINK_ARG_TRANSACTION_ID,
+		      ?DLINK_ARG_ADDRESS,
+		      ?DLINK_ARG_PORT,
+		      ?DLINK_ARG_VERSION, 
+		      ?DLINK_ARG_CERTIFICATE,
+		      ?DLINK_ARG_SIGNATURE],
+		     Elems, undefined),
 
 	    process_authorize(FromPid, PeerIP, PeerPort, 
 			      TransactionID, RemoteAddress, RemotePort, 
-			     ProtoVersion,  Certificate, Signature, CompSpec);
+			      ProtoVersion,  Certificate, Signature, CompSpec);
 
-	?DLINK_CMD_SERVICE_AVAILABLE ->
-	    [ TransactionID, Status, Services, Signature ] = 
-		opts([?DLINK_ARG_TRANSACTION_ID, ?DLINK_ARG_STATUS, ?DLINK_ARG_SERVICES, ?DLINK_ARG_SIGNATURE],
+	?DLINK_CMD_SERVICE_ANNOUNCE ->
+	    [ TransactionID, 
+	      Status, 
+	      Services, 
+	      Signature ] = 
+		opts([?DLINK_ARG_TRANSACTION_ID,
+		      ?DLINK_ARG_STATUS,
+		      ?DLINK_ARG_SERVICES,
+		      ?DLINK_ARG_SIGNATURE],
 		     Elems, undefined),
-	    
-	     	    process_announce(FromPid, PeerIP, PeerPort,
-				     TransactionID, Status, Services, 
-				     Signature, CompSpec);
+
+	    process_announce(FromPid, PeerIP, PeerPort,
+			     TransactionID, Status, Services, 
+			     Signature, CompSpec);
 	?DLINK_CMD_RECEIVE ->
-	    [ _TransactionID, ProtoMod, Data ] = 
-		opts([?DLINK_ARG_TRANSACTION_ID, ?DLINK_ARG_MODULE, ?DLINK_ARG_DATA],
+	    [ _TransactionID, 
+	      ProtoMod, 
+	      Data ] = 
+		opts([?DLINK_ARG_TRANSACTION_ID,
+		      ?DLINK_ARG_MODULE,
+		      ?DLINK_ARG_DATA],
 		     Elems, undefined),
 	    process_data(FromPid, PeerIP, PeerPort,
 			 ProtoMod, Data, CompSpec);
@@ -556,7 +575,8 @@ handle_rpc("send_data", Args) ->
     { ok, Service } = rvi_common:get_json_element(["service"], Args),
     { ok,  Data } = rvi_common:get_json_element([?DLINK_ARG_DATA], Args),
     { ok,  DataLinkOpts } = rvi_common:get_json_element(["opts"], Args),
-    [ Res ]  = gen_server:call(?SERVER, { rvi, send_data, [ProtoMod, Service, Data, DataLinkOpts]}),
+    [ Res ]  = gen_server:call(?SERVER, { rvi, send_data, 
+					  [ProtoMod, Service, Data, DataLinkOpts]}),
     {ok, [ {status, rvi_common:json_rpc_status(Res)} ]};
     
 

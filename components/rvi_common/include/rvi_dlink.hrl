@@ -9,7 +9,7 @@
 %% Commonly used protocol identifiers across dlink implementations
 %%
 -define(DLINK_CMD_AUTHORIZE,         "au").
--define(DLINK_CMD_SERVICE_AVAILABLE, "sa").
+-define(DLINK_CMD_SERVICE_ANNOUNCE,  "sa").
 -define(DLINK_CMD_RECEIVE,           "rcv").
 -define(DLINK_CMD_PING,              "ping").
 
