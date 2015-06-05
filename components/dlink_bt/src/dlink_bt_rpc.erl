@@ -296,8 +296,12 @@ process_data(_FromPid, RemoteBTAddr, RemoteChannel, ProtocolMod, Data, CompSpec)
     ok.
 
 
-process_announce(FromPid, RemoteBTAddr, RemoteChannel,
-		 TransactionID, "available", { array, Services},
+process_announce(FromPid, 
+		 RemoteBTAddr, 
+		 RemoteChannel,
+		 TransactionID, 
+		 "available",
+		 Services,
 		 Signature, CompSpec) ->
     ?debug("dlink_bt:service_announce(available): Address:       ~p-~p", [ RemoteBTAddr, RemoteChannel ]),
     ?debug("dlink_bt:service_announce(available): TransactionID: ~p", [ TransactionID ]),
@@ -315,7 +319,7 @@ process_announce(FromPid,
 		 RemoteChannel,
 		 TransactionID,
 		 "unavailable",
-		 {array, Services},
+		 Services,
 		 Signature ,
 		 CompSpec) ->
     ?debug("dlink_bt:service_announce(unavailable): Address:       ~p-~p",
@@ -433,7 +437,7 @@ handle_socket(FromPid, PeerBTAddr, PeerChannel, data,
 	?DLINK_CMD_SERVICE_ANNOUNCE ->
 	    [ TransactionID, 
 	      Available, 
-	      Services, 
+	      {array, Services}, 
 	      Signature ] = 
 		opts([?DLINK_ARG_TRANSACTION_ID, 
 		      ?DLINK_ARG_STATUS, 

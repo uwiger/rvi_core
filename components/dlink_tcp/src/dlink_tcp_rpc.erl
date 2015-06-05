@@ -495,7 +495,7 @@ handle_socket(FromPid, PeerIP, PeerPort, data, Payload, [CompSpec]) ->
 	?DLINK_CMD_SERVICE_ANNOUNCE ->
 	    [ TransactionID, 
 	      Status, 
-	      Services, 
+	      { array, Services }, 
 	      Signature ] = 
 		opts([?DLINK_ARG_TRANSACTION_ID,
 		      ?DLINK_ARG_STATUS,
