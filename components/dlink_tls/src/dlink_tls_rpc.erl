@@ -660,7 +660,7 @@ process_authorize(FromPid, PeerIP, PeerPort, RemoteAddress,
 
     { NRemoteAddress, NRemotePort} = Conn =
         case { RemoteAddress, RemotePort } of
-            { "0.0.0.0", 0 } ->
+            { <<"0.0.0.0">>, 0 } ->
 
                 ?info("dlink_tls:authorize(): Remote is behind firewall. Will use ~p:~p",
                       [ PeerIP, PeerPort]),
