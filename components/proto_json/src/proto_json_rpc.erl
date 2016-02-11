@@ -147,8 +147,11 @@ handle_call(Other, _From, St) ->
 %% Convert list-based data to binary.
 handle_cast({rvi, receive_message, [Payload, IP, Port | _LogId]} = Msg, St) ->
     ?debug("~p:handle_cast(~p)", [?MODULE, Msg]),
-    Elems = jsx:decode(iolist_to_binary(Payload)),
-
+    Elems = case Payload of
+		[{_,_}|_] -> Payload;
+		_ ->
+		    jsx:decode(iolist_to_binary(Payload))
+	    end,
     [ ServiceName, Timeout, Parameters ] =
 	opts([<<"service">>, <<"timeout">>, <<"parameters">>],
 	     Elems, undefined),
