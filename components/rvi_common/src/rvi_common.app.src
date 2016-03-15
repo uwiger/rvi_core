@@ -15,7 +15,8 @@
   {registered, []},
   {applications, [
                   kernel,
-                  stdlib
+                  stdlib,
+		  netlink
                  ]},
   {mod, { rvi_common_app, []}},
   {start_phases, [{setup_config, []},

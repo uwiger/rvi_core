@@ -35,5 +35,6 @@ init([]) ->
     {ok, { {one_for_one, 5, 10},
 	   [
 	    ?CHILD(rvi_log, worker),
+	    ?CHILD(rvi_netlink, worker),
 	    ?CHILD(rvi_frag, worker)
 	   ]} }.

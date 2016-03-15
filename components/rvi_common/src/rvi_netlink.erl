@@ -9,7 +9,7 @@
 -module(rvi_netlink).
 -behaviour(gen_server).
 
--export([is_network_up/0,
+-export([is_network_up/0, is_network_up/1,
          subscribe/0, subscribe/1, subscribe/2]).
 
 -export([start_link/0]).
@@ -41,6 +41,9 @@
 is_network_up() ->
     call(is_network_up).
 
+is_network_up(Iface) ->
+    call({is_network_up, Iface}).
+
 subscribe() ->
     subscribe(all, operstate).
 
@@ -64,11 +67,13 @@ init(_) ->
           end,
     Interfaces = get_interfaces(),
     ?debug("get_interfaces() -> ~p", [Interfaces]),
-    {ok, #st{ifs = Interfaces,
-             poll_ref = Ref}}.
+    {ok, conn_status(#st{ifs = Interfaces,
+                         poll_ref = Ref})}.
 
 handle_call(is_network_up, _From, #st{connected = Conn} = St) ->
     {reply, Conn, St};
+handle_call({is_network_up, Iface}, _From, #st{ifs = Ifs} = S) ->
+    {reply, is_network_up_(Iface, Ifs), S};
 handle_call({subscribe, Iface, Field}, {Pid, _},
             #st{subscribers = Subs} = St) ->
     Ref = erlang:monitor(process, Pid),
@@ -116,14 +121,19 @@ call(Req) ->
             Reply
     end.
 
-tell_subscribers(Evts, #st{subscribers = Subs} = St) ->
+conn_status(#st{ifs = Ifs} = S) ->
+    Status = is_network_up_(Ifs),
+    ?debug("is_network_up_/1 -> ~p", [Status]),
+    S#st{connected = Status}.
+
+tell_subscribers(Evts, #st{subscribers = Subs, ifs = Ifs} = St) ->
     lists:foreach(
       fun({Name, Field, Old, New}) ->
               [Pid ! {rvi_netlink, Ref, Name, Field, Old, New}
                || #sub{name = N, pid = Pid, ref = Ref} <- Subs,
-                  match_name(N, Name)]
+                  match_name(N, Name, Ifs)]
       end, Evts),
-    St.
+    conn_status(St).
 
 get_interfaces() ->
     case inet:getifaddrs() of
@@ -134,10 +144,36 @@ get_interfaces() ->
             []
     end.
 
+is_network_up_([#iface{name = "lo"}|T]) ->
+    %% skip loopback (always up)
+    is_network_up_(T);
+is_network_up_([#iface{status = up}|_]) ->
+    true;
+is_network_up_([_|T]) ->
+    is_network_up_(T);
+is_network_up_([]) ->
+    false.
+
+is_network_up_(IP, Ifs) when is_tuple(IP) ->
+    Opt = {addr, IP},
+    case [Iface || #iface{opts = Opts} = Iface <- Ifs,
+                   lists:member(Opt, Opts)] of
+        [] -> false;
+        Matching ->
+            is_network_up_(Matching)
+    end;
+is_network_up_(Iface, Ifs) ->
+    case lists:keyfind(str(Iface), #iface.name, Ifs) of
+        #iface{status = Status} ->
+            Status == up;
+        false ->
+            false
+    end.
+
 if_entry({Name, Opts}) ->
     #iface{name = Name,
-        status = if_status(Opts),
-        opts = Opts}.
+           status = if_status(Opts),
+           opts = Opts}.
 
 if_status(Opts) ->
     case lists:member(up, opt(flags, Opts, [])) of
@@ -162,12 +198,26 @@ opt(Key, Opts, Default) ->
             Default
     end.
 
-match_name(_, all) -> true;
-match_name(N, N  ) -> true;
-match_name(A, B) when is_binary(A), is_list(B) ->
-    binary_to_list(A) == B;
-match_name(_, _) ->
+match_name(_, all, _) -> true;
+match_name(N, N  , _) -> true;
+match_name(A, B  , Ifs) when is_binary(A), is_list(B) ->
+    match_name(binary_to_list(A), B, Ifs);
+match_name(A, B, _) when is_list(A), is_list(B) ->
+    lists:prefix(A, B);
+match_name(A, B, Ifs) when is_tuple(A) ->
+    case lists:keyfind(B, #iface.name, Ifs) of
+        #iface{opts = Opts} ->
+            lists:member({addr, A}, Opts);
+        _ ->
+            false
+    end;
+match_name(_, _, _) ->
     false.
 
 start_poll_timer() ->
     erlang:start_timer(?POLL_INTERVAL, self(), poll).
+
+str(S) when is_binary(S) ->
+    binary_to_list(S);
+str(S) when is_list(S) ->
+    S.
