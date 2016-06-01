@@ -62,7 +62,8 @@
 
 -record(service_entry, {
 	  service = "",       %% Servie handled by this entry.
-	  url = undefined     %% URL where the service can be reached.
+	  url = undefined,    %% URL where the service can be reached.
+	  opts = []
 	 }).
 
 record_fields(service_entry)	-> record_info(fields, service_entry);
@@ -228,8 +229,6 @@ handle_local_timeout(CompSpec, SvcName, TransID) ->
 			      { transaction_id, TransID} ],
 			    CompSpec).
 
-
-
 handle_websocket(WSock, Mesg, Arg) ->
     Decoded = try jsx:decode(Mesg)
 	      catch error:E0 ->
@@ -257,14 +256,15 @@ handle_websocket(WSock, Mesg, Arg) ->
     end,
     ok.
 
-
-
 %% Websocket interface
 handle_ws_json_rpc(WSock, <<"message">>, Params, _Arg ) ->
     { ok, SvcName0 } = rvi_common:get_json_element(["service_name"], Params),
     { ok, Timeout } = rvi_common:get_json_element(["timeout"], Params),
-    { ok, Parameters } = rvi_common:get_json_element(["parameters"], Params),
+    { ok, Parameters0 } = rvi_common:get_json_element(["parameters"], Params),
+    Files = rvi_common:get_opt_json_element(["rvi.files"], [], Params),
+    ?debug("Files = ~p", [Files]),
     SvcName = iolist_to_binary(SvcName0),
+    Parameters = append_files_to_params(Files, Parameters0),
     ?event({message, ws, [SvcName, Timeout, Parameters]}),
     ?debug("WS Parameters: ~p", [Parameters]),
     %% Parameters = parse_ws_params(Parameters0),
@@ -292,11 +292,14 @@ handle_ws_json_rpc(WSock, <<"register_service">>, Params,_Arg ) ->
     { ok, SvcName } = rvi_common:get_json_element(["service_name"], Params),
     ?event({register_service, ws, SvcName}),
     ?debug("service_edge_rpc:websocket_register(~p) service:     ~p", [ WSock, SvcName ]),
+    Opts = rvi_common:get_opt_json_element(<<"opts">>, [], Params),
+    LogId = log_id_json_tail(Params),
     [ok, FullSvcName ] = gen_server:call(?SERVER,
 					 { rvi,
 					   register_local_service,
 					   [ SvcName,
-					     "ws:" ++ pid_to_list(WSock)]}),
+					     "ws:" ++ pid_to_list(WSock),
+					     Opts | LogId]}),
 
     { ok, [ { status, rvi_common:json_rpc_status(ok)},
 	    { service, FullSvcName },
@@ -334,9 +337,11 @@ handle_rpc(<<"register_service">>, Args) ->
     {ok, SvcName} = rvi_common:get_json_element([<<"service">>], Args),
     ?event({register_service, json_rpc, SvcName}),
     {ok, URL} = rvi_common:get_json_element([<<"network_address">>], Args),
+    Opts = rvi_common:get_opt_json_element([<<"opts">>], [], Args),
+    LogId = log_id_json_tail(Args),
     [ok, FullSvcName ] = gen_server:call(?SERVER,
 					 { rvi, register_service,
-					   [ SvcName, URL]}),
+					   [ SvcName, URL, Opts | LogId]}),
 
     {ok, [ {status, rvi_common:json_rpc_status(ok) },
 	   { service, FullSvcName },
@@ -347,7 +352,9 @@ handle_rpc(<<"register_service">>, Args) ->
 handle_rpc(<<"unregister_service">>, Args) ->
     {ok, SvcName} = rvi_common:get_json_element(["service"], Args),
     ?event({unregister_service, json_rpc, SvcName}),
-    gen_server:call(?SERVER, { rvi, unregister_local_service, [ SvcName]}),
+    LogId = log_id_json_tail(Args),
+    gen_server:call(?SERVER, { rvi, unregister_local_service,
+			       [SvcName | LogId]}),
     {ok, [ { status, rvi_common:json_rpc_status(ok) },
 	   { method, <<"unregister_service">>}
 	 ]};
@@ -364,7 +371,10 @@ handle_rpc(<<"get_available_services">>, _Args) ->
 handle_rpc(<<"message">>, Args) ->
     {ok, SvcName} = rvi_common:get_json_element(["service_name"], Args),
     {ok, Timeout} = rvi_common:get_json_element(["timeout"], Args),
-    {ok, Parameters} = rvi_common:get_json_element(["parameters"], Args),
+    {ok, Parameters0} = rvi_common:get_json_element(["parameters"], Args),
+    Files = rvi_common:get_opt_json_element(["rvi.files"], [], Args),
+    ?debug("Files = ~p~n", [Files]),
+    Parameters = append_files_to_params(Files, Parameters0),
     ?event({message, json_rpc, [SvcName, Timeout, Parameters]}),
     LogId = log_id_json_tail(Args ++ Parameters),
     case gen_server:call(
@@ -415,13 +425,15 @@ handle_notification(<<"handle_remote_message">>, Args) ->
     { ok, SvcName } = rvi_common:get_json_element(["service"], Args),
     { ok, Timeout } = rvi_common:get_json_element(["timeout"], Args),
     { ok, Parameters } = rvi_common:get_json_element(["parameters"], Args),
+    Files = rvi_common:get_opt_json_element(["rvi.files"], Args),
     gen_server:cast(?SERVER, { rvi, handle_remote_message,
 			       [
-				 IP,
-				 Port,
-				 SvcName,
-				 Timeout,
-				 Parameters
+				IP,
+				Port,
+				SvcName,
+				Timeout,
+				Parameters,
+				Files
 			       ]}),
 
     ok;
@@ -453,25 +465,17 @@ handle_notification(Other, _Args) ->
 %% the only calls invoked by other components, and not the locally
 %% connected services that uses the same HTTP port to transmit their
 %% register_service, and message calls.
-handle_call({ rvi, register_service, [SvcName, URL | T] }, _From, St) ->
-    ?debug("register_service(): service:   ~p ",   [SvcName]),
-    ?debug("register_service(): address:   ~p ",   [URL]),
+handle_call({ rvi, register_service, [SvcName, URL, Opts | T] },
+	    _From, St) ->
+    ?debug("service_edge_rpc:register_local_service(): service:   ~p ",   [SvcName]),
+    ?debug("service_edge_rpc:register_local_service(): address:   ~p ",   [URL]),
 
     FullSvcName = rvi_common:local_service_to_string(SvcName),
-    CS = start_log(T, "reg local service: ~s", [FullSvcName], St#st.cs),
-    ?debug("register_service(): full name: ~p ", [FullSvcName]),
-
-    ets:insert(?SERVICE_TABLE, #service_entry {
-				  service = FullSvcName,
-				  url = URL }),
-
-    %% Register with service discovery, will trigger callback to service_available()
-    %% that forwards the registration to other connected services.
-    service_discovery_rpc:register_services(CS, [FullSvcName], local),
-
-
-    %% Return ok.
-    { reply, [ ok, FullSvcName ], St };
+    try register_local_service_(FullSvcName, URL, Opts, T, St)
+    catch
+	throw:Reason ->
+	    {reply, [Reason], St}
+    end;
 
 handle_call({ rvi, unregister_local_service, [SvcName | T] }, _From, St) ->
     ?debug("service_edge_rpc:unregister_local_service(): service: ~p ", [SvcName]),
@@ -647,7 +651,7 @@ handle_remote_message_(IP, Port, SvcName, Timeout, Parameters, CS) ->
 		     [SvcName])
     end.
 
-handle_local_message_([SvcName, TimeoutArg, Parameters | _] = Args, CS) ->
+handle_local_message_([SvcName, TimeoutArg, Parameters|_] = Args, CS) ->
     ?debug("CS = ~p", [lager:pr(CS, rvi_common)]),
     case authorize_rpc:authorize_local_message(
 	   CS, SvcName, [{service_name, SvcName},
@@ -771,6 +775,22 @@ rpc_return(true, Tag, Timeout, _OrigRes) ->
 	    [timeout]
     end.
 
+register_local_service_(FullSvcName, URL, Opts, T, St) ->
+    SvcOpts = parse_svc_opts(Opts),
+    CS = start_log(T, "reg local service: ~s", [FullSvcName], St#st.cs),
+    ?debug("register_local_service(): full name: ~p ", [FullSvcName]),
+    ets:insert(?SERVICE_TABLE, #service_entry {
+				  service = FullSvcName,
+				  opts = SvcOpts,
+				  url = URL }),
+
+    %% Register with service discovery, will trigger callback to service_available()
+    %% that forwards the registration to other connected services.
+    service_discovery_rpc:register_services(CS, [FullSvcName], local),
+    %% Return ok.
+    { reply, [ ok, FullSvcName ], St }.
+
+
 json_rpc_notification(Method, Parameters) ->
     jsx:encode(
       [{<<"json-rpc">>, <<"2.0">>},
@@ -853,7 +873,8 @@ forward_message_to_local_service(URL, SvcName, Parameters, Synch, Tag, CS) ->
     %%
     Pfx = rvi_common:local_service_prefix(),
     Sz = byte_size(Pfx)-1,
-    <<_:Sz/binary, LocalSvcName/binary>> = SvcName,
+    <<_:Sz/binary, LocalSvcName0/binary>> = SvcName,
+    LocalSvcName = normalize_slash(LocalSvcName0),
     ?debug("Service name: ~p (Pfx = ~p)", [LocalSvcName, Pfx]),
     %% Deliver the message to the local service, which can
     %% be either a wse websocket, or a regular HTTP JSON-RPC call
@@ -886,12 +907,14 @@ maybe_reply(true, Pid, Tag, Res) ->
     Pid ! {rvi, rpc_return, Tag, Res},
     Res.
 
+normalize_slash(Svc) ->
+    {match, [Stripped]} = re:run(Svc, "/*(.*)", [{capture,[1],binary}]),
+    <<"/", Stripped/binary>>.
+
 log_outcome({Status, _}, _SvcName, CS) ->
     log("result: ~w", [Status], CS);
 log_outcome(Other, _SvcName, CS) ->
     log("unexpected: ~w", [Other], CS).
-
-
 
 announce_service_availability(Available, SvcName) ->
     Cmd = case Available of
@@ -971,3 +994,21 @@ log_id_json_tail(Args) ->
 
 event(_, _, _) ->
     ok.
+
+append_files_to_params([], Parameters) ->
+    Parameters;
+append_files_to_params(Files, [T|_] = Parameters) when is_tuple(T) -> % object
+    Parameters ++ [{<<"rvi.files">>, Files}];
+append_files_to_params(Files, [_|_] = Parameters) ->  % array
+    Parameters ++ [[{<<"rvi.files">>, Files}]].
+
+
+parse_svc_opts(Opts) ->
+    Files = rvi_common:get_opt_json_element(<<"files">>, <<"inline">>, Opts),
+    [{<<"files">>, files_option(Files)}].
+
+files_option(O = <<"inline">>)    -> O;
+files_option(O = <<"reject">>)    -> O;
+files_option(O = <<"multipart">>) -> O;
+files_option(_) ->
+    throw(invalid_command).
