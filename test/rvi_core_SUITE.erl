@@ -51,6 +51,7 @@
     t_call_cred_mgmt/1,
     t_remote_call_lock_service/1,
     t_get_node_service_prefix/1,
+    t_get_node_id/1,
     t_check_rvi_log/1,
     t_no_errors/1
    ]).
@@ -109,6 +110,7 @@ groups() ->
        t_multicall_sota_service,
        t_remote_call_lock_service,
        t_get_node_service_prefix,
+       t_get_node_id,
        t_no_errors
       ]},
      {test_run_tls, [],
@@ -123,6 +125,7 @@ groups() ->
        t_call_sota_service,
        t_multicall_sota_service,
        t_get_node_service_prefix,
+       t_get_node_id,
        t_call_sota_service_synch,
        t_call_cred_mgmt,
        t_check_rvi_log,
@@ -151,6 +154,7 @@ groups() ->
        t_call_sota_service,
        t_multicall_sota_service,
        t_get_node_service_prefix,
+       t_get_node_id,
        t_check_rvi_log,
        t_no_errors
       ]},
@@ -165,6 +169,7 @@ groups() ->
        t_multicall_sota_service,
        t_remote_call_lock_service,
        t_get_node_service_prefix,
+       t_get_node_id,
        t_no_errors
       ]}
     ].
@@ -468,6 +473,30 @@ get_short_node_service_prefix_(Node, _Config) ->
 
 node_prefix_result(Res) ->
     proplists:get_value(<<"node_service_prefix">>,
+			proplists:get_value(<<"result">>, Res), []).
+
+t_get_node_id(Config) ->
+    get_node_id_("backend", Config),
+    get_node_id_("sample", Config).
+
+get_node_id_(Node, _Config) ->
+    Reply = json_rpc_request(
+	      service_edge(Node),
+	      <<"get_node_id">>,
+	      []),
+    ct:log("get_node_id (~s) -> ~p", [Node, Reply]),
+    Result = node_id_result(Reply),
+    ct:log("Result = ~p", [Result]),
+    case Node of
+	"sample" ->
+	    %% node id not preconfigured
+	    ok;
+	"backend" ->
+	    <<"BACKEND.ID">> = Result
+    end.
+
+node_id_result(Res) ->
+    proplists:get_value(<<"node_id">>,
 			proplists:get_value(<<"result">>, Res), []).
 
 call_sota_service_(RegName, Data) ->

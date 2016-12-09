@@ -356,6 +356,10 @@ handle_ws_json_rpc(WSock, <<"get_node_service_prefix">>, Params, _Arg) ->
     ?debug("websocket_get_node_service_prefix(~p)", [WSock]),
     get_node_service_prefix_(Params);
 
+handle_ws_json_rpc(WSock, <<"get_node_id">>, Params, _Arg) ->
+    ?debug("websocket_get_node_id(~p)", [WSock]),
+    get_node_id_(Params);
+
 handle_ws_json_rpc(_Ws , <<"get_available_services">>, _Params, _Arg ) ->
     ?debug("service_edge_rpc:websocket_get_available()"),
     [ ok, Services ] =
@@ -405,6 +409,10 @@ handle_rpc(<<"unregister_service">>, Args) ->
 handle_rpc(<<"get_node_service_prefix">>, Params) ->
     ?debug("get_node_service_prefix", []),
     get_node_service_prefix_(Params);
+
+handle_rpc(<<"get_node_id">>, Params) ->
+    ?debug("get_node_id", []),
+    get_node_id_(Params);
 
 handle_rpc(<<"get_available_services">>, _Args) ->
     [ Status, Services ] = gen_server:call(?SERVER, { rvi, get_available_services, []}),
@@ -463,6 +471,12 @@ get_node_service_prefix_(Params) ->
 	    { ok, [ { status, rvi_common:json_rpc_status(invalid_command) },
 		    { method, <<"get_node_service_prefix">> } ] }
     end.
+
+get_node_id_(_Params) ->
+    ID = rvi_common:node_id(),
+    {ok, [ {status, rvi_common:json_rpc_status(ok)},
+	   {node_id, ID},
+	   {method, <<"get_node_id">>} ]}.
 
 handle_notification(<<"service_available">>, Args) ->
     {ok, SvcName} = rvi_common:get_json_element([<<"service">>], Args),
