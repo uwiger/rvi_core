@@ -7,6 +7,7 @@
 	 get_pub_key/1,
 	 provisioning_key/0,
 	 signed_public_key/2,
+	 rescan_creds/0,
 	 %% save_keys/2,
 	 save_cred/5]).
 -export([get_credentials/0,
@@ -165,6 +166,9 @@ update_authorization_cache(Conn, CS) ->
 remove_connection(Conn) ->
     gen_server:cast(?MODULE, {remove_connection, Conn}).
 
+rescan_creds() ->
+    gen_server:cast(?MODULE, {rvi, rescan_creds}).
+
 %% Gen_server functions
 
 start_link() ->
@@ -228,6 +232,9 @@ handle_call_({filter_by_service, Services, Conn0} =R, _From, State) ->
     Filtered = filter_by_service_(Services, Conn),
     ?debug("Filtered = ~p~n", [Filtered]),
     {reply, Filtered, State};
+handle_call_(rescan_creds, _From, S) ->
+    {Res, S1} = rescan_creds_(S),
+    {reply, Res, S1};
 handle_call_({find_cred_by_service, Service} = R, _From, State) ->
     ?debug("authorize_keys:handle_call(~p,...)~n", [R]),
     Res = find_cred_by_service_(Service),
@@ -501,6 +508,18 @@ scan_creds(Dir, Key, Cert) ->
 	    ?warning("Cannot read creads: ~p not a directory", [Dir]),
 	    []
     end.
+
+rescan_creds_(#st{cred_dir = Dir, provisioning_key = Key,
+		  dev_cert = Cert} = S) ->
+    CredRecs = scan_creds(Dir, Key, Cert),
+    ExistingIds = ets:select(?CREDS, [{ {{local, '$1'},'_'}, [], ['$1'] }]),
+    Lost = [ I || I <- ExistingIds,
+		  not lists:keymember(I, #cred.id, CredRecs)],
+    [ets:delete(?CREDS, I) || I <- Lost],
+    [ets:insert(?CREDS, {{local, C#cred.id}, C}) || C <- CredRecs],
+    update_authorization_cache_(
+      local, rvi_common:get_component_specification()),
+    {ok, S}.
 
 process_cred(F, Key, Cert, UTC, Acc) ->
     case file:read_file(F) of
