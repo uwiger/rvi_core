@@ -40,6 +40,7 @@
 	 get_module_json_rpc_address/3,
 	 get_module_json_rpc_url/3,
 	 get_module_genserver_pid/3,
+	 get_config/1, get_config/2, get_config/3,
 	 get_value/3
 	]).
 -export([set_value/3]).
@@ -605,6 +606,29 @@ get_component_modules(rvi_common, CompSpec) ->
 
 get_component_modules(_, _) ->
     undefined.
+
+get_config(Alts) ->
+    get_config(Alts, fun(X) -> X end, undefined).
+
+get_config(Alts, Default) ->
+    get_config(Alts, fun(X) -> X end, Default).
+
+get_config([{option, K, L}|T], Verify, Def) ->
+    case lists:keyfind(K, 1, K) of
+	false -> get_config(T, Verify, Def);
+	Found -> Verify(Found)
+    end;
+get_config([{config, {Comp, Module, Key, Cs}}|T], Verify, Def) ->
+    case get_module_specification(Comp, Module, Key, Cs) of
+	{ok, Value} -> Verify(Value);
+	{error, _}  -> get_config(T, Verify, Def)
+    end;
+get_config([{default, Def}|T], Verify, _) ->
+    get_config(T, Verify, Def);
+get_config([{verify, V}|T], OldV, Default) when is_function(V, 1) ->
+    get_config(T, fun(X) -> V(OldV(X)) end, Default);
+get_config([], Verify, Default) ->
+    Verify(Default).
 
 %% Get the spec for a specific module (protocol_bert_rpc) within
 %% a component (protocol).

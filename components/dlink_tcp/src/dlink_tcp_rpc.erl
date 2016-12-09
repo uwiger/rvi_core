@@ -137,15 +137,22 @@ setup_initial_listeners(CompSpec) ->
 	    ?info("dlink_tcp: no initial listeners", [])
     end.
 
-setup_persistent_connections_([ ], _CompSpec) ->
-     ok;
+setup_persistent_connections_(Conns, CompSpec) ->
+    ?debug("setup_persistent_connections()", []),
+    lists:foreach(fun(C) ->
+			  ?debug("Conn = ~p", [C]),
+			  setup_persistent_connection_(C, CompSpec)
+		  end, Conns).
 
-setup_persistent_connections_([ NetworkAddress | T], CompSpec) ->
-    ?debug("~p: Will persistently connect connect : ~p", [self(), NetworkAddress]),
+setup_persistent_connection_({Address, Options} = C, CompSpec)
+  when is_list(Address) ->
+    [IP, Port] = string:tokens(Address, ":"),
+    setup_reconnect_timer(0, {IP, Port, Options, CompSpec});
+setup_persistent_connection_(NetworkAddress, CompSpec) when is_list(Address) ->
     [ IP, Port] =  string:tokens(NetworkAddress, ":"),
-    connect_and_retry_remote(IP, Port, CompSpec),
-    setup_persistent_connections_(T, CompSpec),
-    ok.
+    setup_reconnect_timer(0, {IP, Port, [], CompSpec});
+setup_persistent_connection_(Other, _CompSpec) ->
+    ?error("Invalid persistent connection: ~p", [Other]).
 
 service_available(CompSpec, SvcName, DataLinkModule) ->
     rvi_common:notification(data_link, ?MODULE,
@@ -190,7 +197,7 @@ send_data(CompSpec, ProtoMod, Service, DataLinkOpts, Data) ->
 %%
 %% Connect to a remote RVI node.
 %%
-connect_remote(IP, Port, CompSpec) ->
+connect_remote(IP, Port, Opts, CompSpec) ->
     ?info("connect_remote(~p, ~p)~n", [IP, Port]),
     case connection_manager:find_connection_by_address(IP, Port) of
 	{ ok, _Pid } ->
@@ -199,10 +206,15 @@ connect_remote(IP, Port, CompSpec) ->
 
 	not_found ->
 	    %% Setup a new outbound connection
+	    Timeout =
+		rvi_common:get_config(
+		  [{prop, timeout, Opts},
+		   {config, {data_link, ?MODULE, connect_timeout}, CompSpec}],
+		  10000),
 	    ?info("dlink_tcp:connect_remote(): Connecting ~p:~p",
 		  [IP, Port]),
 	    log("new connection", [], CompSpec),
-	    case gen_tcp:connect(IP, Port, listener:sock_opts()) of
+	    case gen_tcp:connect(IP, Port, listener:sock_opts(), Timeout) of
 		{ ok, Sock } ->
 		    ?info("dlink_tcp:connect_remote(): Connected ~p:~p",
 			   [IP, Port]),
@@ -224,12 +236,21 @@ connect_remote(IP, Port, CompSpec) ->
 	    end
     end.
 
-connect_and_retry_remote( IP, Port, CompSpec) ->
+connect_and_retry_remote({ IP, Port, Options, CompSpec }) ->
     ?info("dlink_tcp:connect_and_retry_remote(): ~p:~p",
 	  [ IP, Port]),
 
+    case reached_max_retries(Options, CompSpec) of
+	true ->
+	    ?notice("Reached max number of retries: ~p:~p", [IP, Port]),
+	    unavailable;
+	false->
+	    connect_and_retry_remote(IP, Port, Options, CompSpec)
+    end.
+
+connect_and_retry_remote(IP, Port, Options, CompSpec) ->
     CS = start_log(<<"conn">>, "connect ~s:~s", [IP, Port], CompSpec),
-    case connect_remote(IP, list_to_integer(Port), CS) of
+    case connect_remote(IP, list_to_integer(Port), Options, CS) of
 	ok  ->
 	    log(result, "connected", [], CS),
 	    ok;
@@ -238,12 +259,20 @@ connect_and_retry_remote( IP, Port, CompSpec) ->
 	    ?notice("dlink_tcp:connect_and_retry_remote(~p:~p): Failed: ~p",
 			   [IP, Port, Err]),
 
-	    ?notice("dlink_tcp:connect_and_retry_remote(~p:~p): Will try again in ~p sec",
-			   [IP, Port, ?DEFAULT_RECONNECT_INTERVAL]),
-	    log("start reconnect timer", [], CS),
-	    setup_reconnect_timer(?DEFAULT_RECONNECT_INTERVAL, IP, Port, CS),
-
-	    not_available
+	    case rvi_netlink:is_network_up(IP) of
+		true ->
+		    ?notice("dlink_tcp:connect_and_retry_remote(~p:~p):"
+			    " Will try again in ~p sec",
+			    [IP, Port, ?DEFAULT_RECONNECT_INTERVAL]),
+		    log("start reconnect timer", [], CS),
+		    setup_reconnect_timer(
+		      ?DEFAULT_RECONNECT_INTERVAL, {IP, Port, Options, CS}),
+		    retrying;
+		false ->
+		    ?notice(
+		       "dlink_tcp: no network available (~p/~p)" [IP Port]),
+		    unavailable
+	    end
     end.
 
 
@@ -319,7 +348,7 @@ handle_socket_(FromPid, SetupIP, SetupPort, closed, CompSpec) ->
 	    [ IP, Port] = string:tokens(NetworkAddress, ":"),
 
 	    setup_reconnect_timer(?DEFAULT_RECONNECT_INTERVAL,
-				  IP, Port, CompSpec);
+				  IP, Port, [], CompSpec);
 	false -> ok
     end,
     ok;
@@ -584,9 +613,9 @@ handle_info({ rvi_ping, Pid, Address, Port, Timeout},  St) ->
     {noreply, St};
 
 %% Setup static nodes
-handle_info({ rvi_setup_persistent_connection, IP, Port, CompSpec }, St) ->
+handle_info({ rvi_setup_persistent_connection, Args }, St) ->
     ?info("rvi_setup_persistent_connection, ~p, ~p~n", [IP, Port]),
-    connect_and_retry_remote(IP, Port, CompSpec),
+    connect_and_retry_remote(Args),
     { noreply, St };
 
 
@@ -599,11 +628,22 @@ terminate(_Reason, _St) ->
 code_change(_OldVsn, St, _Extra) ->
     {ok, St}.
 
-setup_reconnect_timer(MSec, IP, Port, CompSpec) ->
+setup_reconnect_timer(MSec, {_, _, _, CS} = Args0) ->
+    PrevAttempt = rvi_common:get_value(connect_attempt, 0, CS),
+    Attempt = PrevAttempt + 1,
+    Args = setelement(4, Args0, rvi_common:set_value(
+				  connect_attempt, Attempt, CS)),
     erlang:send_after(MSec, ?MODULE,
-		      { rvi_setup_persistent_connection,
-			IP, Port, CompSpec }),
+		      { rvi_setup_persistent_connection, Args }),
     ok.
+
+reached_max_retries(Opts, CS) ->
+    Max = rvi_common:get_config(
+	    [{prop, connect_retries, Opts},
+	     {config, {data_link, ?MODULE, connect_retries}, CS}],
+	    infinity),
+    Attemps = rvi_common:get_value(connect_attempt, 0, CS),
+    Attemps > Max.
 
 get_services_by_connection(ConnPid) ->
     case ets:lookup(?CONNECTION_TABLE, ConnPid) of
@@ -799,14 +839,11 @@ delete_connection(Conn) ->
     ets:delete(?CONNECTION_TABLE, Conn),
     ok.
 
-
-
 get_connections('$end_of_table', Acc) ->
     Acc;
 
 get_connections(Key, Acc) ->
     get_connections(ets:next(?CONNECTION_TABLE, Key), [ Key | Acc ]).
-
 
 get_connections() ->
     get_connections(ets:first(?CONNECTION_TABLE), []).
@@ -828,7 +865,6 @@ opt(K, L, Def) ->
 
 opts(Keys, Elems, Def) ->
     [ opt(K, Elems, Def) || K <- Keys].
-
 
 log_orphan(Pfx, Fmt, Args) ->
     start_log(Pfx, Fmt, Args, #component_spec{}).

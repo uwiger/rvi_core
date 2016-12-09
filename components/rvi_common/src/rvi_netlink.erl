@@ -42,7 +42,11 @@ is_network_up() ->
     call(is_network_up).
 
 is_network_up(Iface) ->
-    call({is_network_up, Iface}).
+    case is_loopback(Iface) of
+        true  -> true;
+        false ->
+            call({is_network_up, Iface})
+    end.
 
 subscribe() ->
     subscribe(all, operstate).
@@ -204,7 +208,7 @@ match_name(A, B  , Ifs) when is_binary(A), is_list(B) ->
     match_name(binary_to_list(A), B, Ifs);
 match_name(A, B, _) when is_list(A), is_list(B) ->
     lists:prefix(A, B);
-match_name(A, B, Ifs) when is_tuple(A) ->
+match_name(A, B, Ifs) when is_tuple(A), is_list(B) ->
     case lists:keyfind(B, #iface.name, Ifs) of
         #iface{opts = Opts} ->
             lists:member({addr, A}, Opts);
@@ -221,3 +225,19 @@ str(S) when is_binary(S) ->
     binary_to_list(S);
 str(S) when is_list(S) ->
     S.
+
+is_loopback({iface, "lo"})     -> true;
+is_loopback("lo")              -> true;
+is_loopback({ip, "localhost"}) -> true;
+is_loopback({ip, IP})          ->
+    case inet:parse_ipv4_address(IP) of
+        {ok, {127,0,0,1}} -> true;
+        {ok, _}           -> false;
+        {error, einval}   ->
+            case inet:parse_ipv6_address(IP) of
+                {ok, {0,0,0,0,0,0,0,1}} -> true;
+                _                       -> false
+            end
+    end;
+is_loopback(_) ->
+    false.

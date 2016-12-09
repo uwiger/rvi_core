@@ -8,7 +8,7 @@
 
 
 -module(dlink_tls_rpc).
--behavior(gen_server).
+-behavior(dlink_gen_rpc).
 
 -export([handle_rpc/2]).
 -export([handle_notification/2]).
@@ -18,6 +18,8 @@
 -export([start_link/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
 	 terminate/2, code_change/3]).
+
+-export([table_name/1]).
 
 -export([start_json_server/0]).
 -export([start_connection_manager/0]).
@@ -66,21 +68,21 @@
 	  tid = 1
 	 }).
 
-
 start_link() ->
-    gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
+    dlink_gen_rpc:start_link(?SERVER, ?MODULE, []).
+    %% gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
 
 init([]) ->
-    ?info("dlink_tls:init(): Called"),
+    ?debug("dlink_tls:init(): Called"),
     %% Dig out the bert rpc server setup
 
-    ets:new(?SERVICE_TABLE, [ set, public, named_table,
-			     { keypos, #service_entry.service }]),
+    %% ets:new(?SERVICE_TABLE, [ set, public, named_table,
+    %% 			     { keypos, #service_entry.service }]),
 
-    ets:new(?CONNECTION_TABLE, [ set, public, named_table,
-				 { keypos, #connection_entry.connection }]),
+    %% ets:new(?CONNECTION_TABLE, [ set, public, named_table,
+    %% 				 { keypos, #connection_entry.connection }]),
 
-    CS = rvi_common:get_component_specification(),
+    %% CS = rvi_common:get_component_specification(),
     service_discovery_rpc:subscribe(CS, ?MODULE),
 
     {ok, #st {
@@ -91,32 +93,35 @@ init([]) ->
 start_json_server() ->
     rvi_common:start_json_rpc_server(data_link, ?MODULE, dlink_tls_sup).
 
+table_name(connections) -> ?CONNECTION_TABLE;
+table_name(services   ) -> ?SERVICE_TABLE.
 
 start_connection_manager() ->
-    CompSpec = rvi_common:get_component_specification(),
-    {ok, TlsOpts} = rvi_common:get_module_config(data_link,
-						 ?MODULE,
-						 ?SERVER_OPTS,
-						 [],
-						 CompSpec),
-    ?debug("TlsOpts = ~p", [TlsOpts]),
-    ?info("dlink_tls:init_rvi_component(~p): Starting listener.", [self()]),
+    dlink_gen_rpc:setup_connections(?SERVER).
+    %% CompSpec = rvi_common:get_component_specification(),
+    %% {ok, TlsOpts} = rvi_common:get_module_config(data_link,
+    %% 						 ?MODULE,
+    %% 						 ?SERVER_OPTS,
+    %% 						 [],
+    %% 						 CompSpec),
+    %% ?debug("TlsOpts = ~p", [TlsOpts]),
+    %% ?info("dlink_tls:init_rvi_component(~p): Starting listener.", [self()]),
 
-    %% Fire up listener
-    %% dlink_tls_connmgr:start_link(),
-    %% {ok,Pid} = dlink_tls_listener:start_link(),
+    %% %% Fire up listener
+    %% %% dlink_tls_connmgr:start_link(),
+    %% %% {ok,Pid} = dlink_tls_listener:start_link(),
 
-    setup_initial_listeners(TlsOpts, CompSpec),
+    %% setup_initial_listeners(TlsOpts, CompSpec),
 
-    ?info("dlink_tls:init_rvi_component(): Setting up persistent connections."),
+    %% ?info("dlink_tls:init_rvi_component(): Setting up persistent connections."),
 
-    {ok, PersistentConnections } = rvi_common:get_module_config(data_link,
-								?MODULE,
-								?PERSISTENT_CONNECTIONS,
-								[],
-								CompSpec),
-    setup_persistent_connections_(PersistentConnections, CompSpec),
-    ok.
+    %% {ok, PersistentConnections } = rvi_common:get_module_config(data_link,
+    %% 								?MODULE,
+    %% 								?PERSISTENT_CONNECTIONS,
+    %% 								[],
+    %% 								CompSpec),
+    %% setup_persistent_connections_(PersistentConnections, CompSpec),
+    %% ok.
 
 setup_initial_listeners([], _CompSpec) ->
     ?debug("no initial listeners", []);
@@ -157,17 +162,23 @@ setup_listener(IP, Port, Opts, CompSpec) ->
 	    ok
     end.
 
-setup_persistent_connections_([ ], _CompSpec) ->
-     ok;
+setup_persistent_connections_(Conns, CompSpec) ->
+    ?debug("setup_persistent_connections()", []),
+    lists:foreach(fun(C) ->
+			  ?debug("Conn = ~p", [C]),
+			  setup_persistent_connection_(C, CompSpec)
+		  end, Conns).
 
-
-setup_persistent_connections_([ NetworkAddress | T], CompSpec) ->
-    ?debug("~p: Will persistently connect connect : ~p", [self(), NetworkAddress]),
-    [ IP, Port] =  string:tokens(NetworkAddress, ":"),
+setup_persistent_connection_({Address, Options} = C, CompSpec)
+  when is_list(Address) ->
+    [IP, Port] = string:tokens(Address, ":"),
+    setup_reconnect_timer(0, {IP, Port, Options, CompSpec});
+setup_persistent_connection_(Address, CompSpec) when is_list(Address) ->
+    [ IP, Port] =  string:tokens(Address, ":"),
     %% cast an immediate (re-)connect attempt to dlink_tls_rpc
-    setup_reconnect_timer(0, IP, Port, CompSpec),
-    setup_persistent_connections_(T, CompSpec),
-    ok.
+    setup_reconnect_timer(0, {IP, Port, CompSpec});
+setup_persistent_connection_(Other, _CompSpec) ->
+    ?error("Invalid persistent connection: ~p", [Other]).
 
 service_available(CompSpec, SvcName, DataLinkModule) ->
     rvi_common:notification(data_link, ?MODULE,
@@ -212,7 +223,7 @@ send_data(CompSpec, ProtoMod, Service, DataLinkOpts, Data) ->
 %%
 %% Connect to a remote RVI node.
 %%
-connect_remote(IP, Port, CompSpec) ->
+connect_remote(IP, Port, Opts, CompSpec) ->
     ?info("connect_remote(~p, ~p)~n", [IP, Port]),
     case dlink_tls_connmgr:find_connection_by_address(IP, Port) of
 	{ ok, _Pid } ->
@@ -221,8 +232,15 @@ connect_remote(IP, Port, CompSpec) ->
 
 	not_found ->
 	    %% Setup a new outbound connection
-	    {ok, Timeout} = rvi_common:get_module_config(
-			      data_link, ?MODULE, connect_timeout, 10000, CompSpec),
+	    Timeout =
+		rvi_common:get_config(
+		  [{option, timeout, Opts},
+		   {config, {data_link, ?MODULE, connect_timeout}, CompSpec}],
+
+		  10000),
+
+	    %% {ok, Timeout} = rvi_common:get_module_config(
+	    %% 		      data_link, ?MODULE, connect_timeout, 10000, CompSpec),
 	    ?info("dlink_tls:connect_remote(): Connecting ~p:~p (TO=~p",
 		  [IP, Port, Timeout]),
 	    log("new connection", [], CompSpec),
@@ -255,11 +273,16 @@ connect_remote(IP, Port, CompSpec) ->
 	    end
     end.
 
-connect_and_retry_remote( IP, Port, CompSpec) ->
-    ?info("dlink_tls:connect_and_retry_remote(): ~p:~p",
-	  [ IP, Port]),
+connect_and_retry_remote(Args) ->
+    {IP, Port, CompSpec, Opts} =
+	case Args of
+	    {I, P, Cs}		-> {I, P, [], Cs};
+	    {I, P, Os, Cs}	-> {I, P, Os, Cs}
+	end,
+    ?info("dlink_tls:connect_and_retry_remote(): ~p:~p (~p)",
+	  [IP, Port, Opts]),
     CS = start_log(<<"conn">>, "connect ~s:~s", [IP, Port], CompSpec),
-    case connect_remote(IP, list_to_integer(Port), CS) of
+    case connect_remote(IP, list_to_integer(Port), Opts, CS) of
 	ok ->
 	    log("connected", [], CS),
 	    ok;
@@ -521,10 +544,15 @@ handle_call({rvi, setup_data_link, [ Service, Opts ]}, _From, St) ->
 			  [Service]),
 		    { reply, [ok, -1 ], St };
 
-		Addr ->
+		Tgt ->
+		    {Addr, Opts} = case Tgt of
+				       {A, Os} -> {A, Os};
+				       A       -> {A, []}
+				   end,
 		    [ Address, Port] =  string:tokens(Addr, ":"),
 
-		    case connect_remote(Address, list_to_integer(Port), St#st.cs) of
+		    case connect_remote(Address, list_to_integer(Port),
+					Opts, St#st.cs) of
 			ok  ->
 			    { reply, [ok, 2000], St };  %% 2 second timeout
 
@@ -604,9 +632,9 @@ handle_info({ rvi_ping, Pid, Address, Port, Timeout},  St) ->
     {noreply, St};
 
 %% Setup static nodes
-handle_info({ rvi_setup_persistent_connection, IP, Port, CompSpec }, St) ->
+handle_info({rvi_setup_persistent_connection, Args}, St) ->
     ?info("rvi_setup_persistent_connection, ~p, ~p~n", [IP, Port]),
-    connect_and_retry_remote(IP, Port, CompSpec),
+    connect_and_retry_remote(Args),
     { noreply, St };
 
 
@@ -619,10 +647,8 @@ terminate(_Reason, _St) ->
 code_change(_OldVsn, St, _Extra) ->
     {ok, St}.
 
-setup_reconnect_timer(MSec, IP, Port, CompSpec) ->
-    erlang:send_after(MSec, ?MODULE,
-		      { rvi_setup_persistent_connection,
-			IP, Port, CompSpec }),
+setup_reconnect_timer(MSec, Args) ->
+    erlang:send_after(MSec, ?MODULE, {rvi_setup_persistent_connection, Args})
     ok.
 
 get_services_by_connection(ConnPid) ->
