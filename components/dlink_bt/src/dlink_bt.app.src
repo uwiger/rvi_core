@@ -21,7 +21,7 @@
 		  bt
                  ]},
   {mod, { dlink_bt_app, []}},
-  {start_phases, [{json_rpc, []}, {connection_manager, []}, {announce, []}]},
+  {start_phases, [{announce, []}]},
   {env, [
 	 {rvi_core_await, [{n,l,dlink_bt}]}
 	]}

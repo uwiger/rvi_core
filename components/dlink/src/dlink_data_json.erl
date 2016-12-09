@@ -16,7 +16,7 @@ decode(Msg, F, St) when is_function(F, 1) ->
     jsx_decode_stream(Msg, F, St).
 
 encode(Msg, St) ->
-    {ok, rvi_common:term_to_json(Msg), St}.
+    {ok, jsx:encode(Msg), St}.
 
 jsx_decode_stream(Data, F, St) ->
     case jsx_decode(Data, St) of
@@ -31,6 +31,6 @@ jsx_decode_stream(Data, F, St) ->
     end.
 
 jsx_decode(Data, []) ->
-    jsx:decode(Data, [stream, return_tail]);
+    jsx:decode(Data, [stream, return_tail, return_maps]);
 jsx_decode(Data, Cont) when is_function(Cont, 1) ->
     Cont(Data).

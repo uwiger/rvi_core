@@ -13,69 +13,56 @@
 -include_lib("rvi_common/include/rvi_common.hrl").
 %% API
 -export([start_link/0]).
--export([schedule_message/4]).
+-export([schedule_message/1]).
 
 %% Invoked by service discovery
 %% FIXME: Should be rvi_service_discovery behavior
--export([service_available/3,
-	 service_unavailable/3]).
+-export([service_available/2,
+	 service_unavailable/2]).
 -export([publish_node_id/3]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
 	 terminate/2, code_change/3]).
 
--export([start_json_server/0]).
 -define(SERVER, ?MODULE).
-
-
--export([handle_rpc/2,
-	 handle_notification/2]).
-
 
 %% Message structure and storage
 %%  A message is a piece of
 %%
 %%  Service -> ETS -> Messages
 -record(service, {
-	  key = { "", unknown }, %% Service name and data link module
+	  key = {"", unknown}, %% Service name (lowercase) and data link module
+	  service = "",  %% real service name
 
 	  %% Is this service currently available on the data link module
 	  available = false,
 
 	  %% Table containing #message records,
 	  %% indexed by their transaction ID (and sequence of delivery)
-	  messages_tid =  undefined,
-
-	  %% Component specification
-	  cs = #component_spec{}
-
+	  messages_tid =  undefined
 	 }).
 
 
 % A single message to be delivered to a service.
 % Messages are stored in ets tables hosted by a service
 
--record(message, {
+-record(entry, {
 	  transaction_id, %% Transaction ID that message is tagged with.
 	  service,        %% Target service
 	  timeout,        %% Timeout, UTC
-	  data_link,      %% Data Link Module to use. { Module, Opts}
-	  protocol,       %% Protocol to use. { Module Opts }
+	  data_link,      %% Data Link Module to use. {Module, Opts}
+	  message,
 	  routes,         %% Routes retrieved for this
-	  timeout_tref,   %% Reference to erlang timer associated with this message.
-	  log_id,
-	  parameters
+	  timeout_tref,   %% Ref to erlang timer associated with this message.
+	  log_id
 	 }).
-
 
 -record(st, {
 	  next_transaction_id = 1, %% Sequentially incremented transaction id.
 	  services_tid = undefined,
 	  cs %% Service specification
 	 }).
-
-
 
 %%%===================================================================
 %%% API
@@ -110,143 +97,52 @@ init([]) ->
     %% Setup the relevant ets tables.
     %% Unsubscribe from service availablility notifications
     CS = rvi_common:get_component_specification(),
-
     service_discovery_rpc:subscribe(CS, ?MODULE),
     {ok, #st{
 	    cs = CS,
 	    services_tid = ets:new(rvi_schedule_services,
-				     [  set, private,
-					{ keypos, #service.key } ])}}.
+				   [set, private, {keypos, #service.key}])}}.
 
-start_json_server() ->
-    rvi_common:start_json_rpc_server(schedule, ?MODULE, schedule_sup).
+schedule_message(#{} = Msg) ->
+    gen_server:call(?MODULE, {schedule_message, Msg}).
 
-schedule_message(CompSpec,
-		 SvcName,
-		 Timeout,
-		 Parameters) ->
-
-    rvi_common:request(schedule, ?MODULE,
-		       schedule_message,
-		       [{ service, SvcName },
-			{ timeout, Timeout },
-			{ parameters, Parameters }],
-		       [status, transaction_id], CompSpec).
-
-publish_node_id(Cs, NodeId, DLMod) ->
+publish_node_id(NodeId, DLMod) ->
     P = self(),
-    S = <<"rvi:", NodeId/binary>>,
+    S = <<"$RVI/", NodeId/binary>>,
     spawn(fun() ->
                   MRef = erlang:monitor(process, P),
                   receive
                       {'DOWN', MRef, _, _, _} ->
-                          service_unavailable(Cs, S, DLMod)
+                          service_unavailable(S, DLMod)
                   end
           end),
-    service_available(Cs, S, DLMod).
+    service_available(S, DLMod).
 
-service_available(CompSpec, SvcName, DataLinkModule) ->
+service_available(SvcName, DataLinkModule) ->
+    cast({service_available, SvcName, DataLinkModule}).
 
-    rvi_common:notification(schedule, ?MODULE,
-			    service_available,
-			    [{ service, SvcName },
-			     { data_link_mod, DataLinkModule } ],
-			    CompSpec).
+service_unavailable(SvcName, DataLinkModule) ->
+    cast({service_unavailable, SvcName, DataLinkModule}).
 
-service_unavailable(CompSpec, SvcName, DataLinkModule) ->
-    rvi_common:notification(schedule, ?MODULE,
-			    service_unavailable,
-			    [{ service, SvcName },
-			     { data_link_mod, DataLinkModule } ],
-			    CompSpec).
+cast(Msg) ->
+    gen_server:cast(?MODULE, Msg).
 
-%% JSON-RPC entry point
-%% CAlled by local exo http server
-handle_rpc(<<"schedule_message">>, Args) ->
-
-    {ok, SvcName} = rvi_common:get_json_element(["service"], Args),
-    {ok, Timeout} = rvi_common:get_json_element(["timeout"], Args),
-    {ok, Parameters} = rvi_common:get_json_element(["parameters"], Args),
-    LogId = rvi_common:get_json_log_id(Args),
-
-    ?debug("schedule_rpc:schedule_request(): service:     ~p", [ SvcName]),
-    ?debug("schedule_rpc:schedule_request(): timeout:     ~p", [ Timeout]),
-%%    ?debug("schedule_rpc:schedule_request(): parameters:      ~p", [Parameters]),
-
-    [ok, TransID] = gen_server:call(?SERVER, { rvi, schedule_message,
-					       [ SvcName,
-						 Timeout,
-						 Parameters,
-						 LogId ]}),
-
-    {ok, [ { status, rvi_common:json_rpc_status(ok)},
-	   { transaction_id, TransID } ] };
-
-
-handle_rpc(Other, _Args) ->
-    ?debug("schedule_rpc:handle_rpc(~p): unknown", [ Other ]),
-    {ok, [ {status, rvi_common:json_rpc_status(invalid_command)}]}.
-
-
-
-handle_notification(<<"service_available">>, Args) ->
-    {ok, SvcName} = rvi_common:get_json_element(["service"], Args),
-    {ok, DataLinkModule} = rvi_common:get_json_element(["data_link_mod"], Args),
-    LogId = rvi_common:get_json_log_id(Args),
-
-    gen_server:cast(?SERVER, { rvi, service_available,
-				      [ SvcName,
-					list_to_existing_atom(DataLinkModule),
-					LogId ]}),
-    ok;
-
-handle_notification(<<"service_unavailable">>, Args) ->
-    {ok, SvcName} = rvi_common:get_json_element(["service"], Args),
-    {ok, DataLinkModule} = rvi_common:get_json_element(["data_link_mod"], Args),
-    LogId = rvi_common:get_json_log_id(Args),
-
-    gen_server:cast(?SERVER, { rvi, service_unavailable,
-				      [ SvcName,
-					list_to_atom(DataLinkModule),
-					LogId ]}),
-
-    ok;
-
-handle_notification(Other, _Args) ->
-    ?debug("schedule_notification:handle_other(~p): unknown", [ Other ]),
-    ok.
-
-handle_call( { rvi, schedule_message,
-	       [SvcName,
-		Timeout,
-		Parameters | LogId] }, _From, St) ->
-
-    ?debug("sched:sched_msg(): service:     ~p", [SvcName]),
-    ?debug("sched:sched_msg(): timeout:     ~p", [Timeout]),
-    ?debug("sched:sched_msg(): parameters:  ~p", [Parameters]),
-    %%?debug("sched:sched_msg(): St:          ~p", [St]),
+handle_call({schedule_message,
+	     #{<<"service">> := SvcName,
+	       normalized_name := Normalized} = Msg}, {Pid, _Ref}, St) ->
+    ?debug("sched_msg(): service:     ~p", [SvcName]),
 
     %% Create a transaction ID
-    { TransID, NSt1} = create_transaction_id(St),
-    log(LogId, "queue: tid=~w", [TransID]),
+    {TransID, St1} = create_transaction_id(St),
+    log(Msg, "queue: tid=~w", [TransID]),
     %% Queue the message
-    Msg = #message{transaction_id = TransID,
-		   service = SvcName,
-		   timeout = Timeout,
-		   parameters = Parameters,
-		   log_id = LogId},
-    {_, NSt2 }= queue_message(Msg,
-			      rvi_routing:get_service_routes(SvcName), %% Can be [] (no route)
-			      NSt1),
-
-    { reply, [ok, TransID], NSt2 };
-
-
-
+    {_, St2} = queue_message(
+		 Msg#{pid => Pid}, rvi_routing:get_service_routes(Normalized),
+		 St1),
+    {reply, {ok, TransID}, St2};
 handle_call(Other, _From, St) ->
-    ?warning("sched:handle_call(~p): unknown", [ Other ]),
-    { reply,  [unknown_command] , St}.
-
+    ?warning("sched:handle_call(~p): unknown", [Other]),
+    {reply,  {error, unknown_command}, St}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -259,46 +155,37 @@ handle_call(Other, _From, St) ->
 %% @end
 %%--------------------------------------------------------------------
 
-
-handle_cast( {rvi, service_available, [ SvcName, DataLinkModule|_]}, St) ->
-
+handle_cast({service_available, SvcName, DataLinkModule}, St) ->
     %% Find or create the service.
-    ?debug("sched:service_available(): ~p:~s", [ DataLinkModule, SvcName ]),
-
+    ?debug("service_available(): ~p:~s", [DataLinkModule, SvcName]),
     %% Create a new or update an existing service.
     SvcRec = update_service(SvcName, DataLinkModule, available, St),
 
     %% Try to send any pending messages waiting for this
     %% service / data link combo.
-    { _, NSt1} = send_queued_messages(SvcRec, St),
+    {_, NSt1} = send_queued_messages(SvcRec, St),
 
     %% Send any orphaned messages waiting for the service
     %% to come up
     NSt2 = send_orphaned_messages(SvcName, DataLinkModule, NSt1),
-    { noreply, NSt2 };
+    {noreply, NSt2};
 
-handle_cast( {rvi, service_unavailable, [SvcName, DataLinkModule|_]},
-	    #st { services_tid = SvcTid } = St) ->
-
+handle_cast({service_unavailable, SvcName, DataLinkModule},
+	    #st{services_tid = SvcTid} = St) ->
     %% Grab the service
-    case ets:lookup(SvcTid, {SvcName, DataLinkModule}) of
+    case ets:lookup(SvcTid, {to_lower(SvcName), DataLinkModule}) of
 	[] ->  %% No service found - no op.
 	    {noreply, St};
-
-	[ SvcRec ] ->
+	[SvcRec] ->
 	    %% Delete service if it does not have any pending messages.
 	    case delete_unused_service(SvcTid, SvcRec) of
 		true ->  %% service was deleted
-		    { noreply, St};
-
+		    {noreply, St};
 		false -> %% SvcName was not deleted, set it to not available
 		    update_service(SvcName, DataLinkModule, unavailable, St),
-
-		    { noreply, St }
+		    {noreply, St}
 	    end
-
     end;
-
 
 handle_cast(Other, St) ->
     ?warning("sched:handle_cast(~p): unknown", [ Other ]),
@@ -316,57 +203,47 @@ handle_cast(Other, St) ->
 %%--------------------------------------------------------------------
 
 %% Handle timeouts
-handle_info({ rvi_message_timeout, SvcName, DLMod,TransID},
-	    #st { services_tid = SvcTid } = St) ->
-
-    ?info("sched:timeout(~p:~p): trans_id: ~p", [ DLMod, SvcName, TransID]),
+handle_info({rvi_message_timeout, SvcName, DLMod, TransID},
+	    #st{services_tid = SvcTid} = St) ->
+    ?debug("timeout(~p:~p): trans_id: ~p", [DLMod, SvcName, TransID]),
     %% Look up the service / DataLink mod
-    case  ets:lookup(SvcTid, {SvcName, DLMod}) of
-	[ SvcRec ] -> %% Found service for specific data link
-
+    case ets:lookup(SvcTid, {to_lower(SvcName), DLMod}) of
+	[SvcRec] -> %% Found service for specific data link
 	    %% Delete message from service queue
 	    case ets:lookup(SvcRec#service.messages_tid, TransID) of
-		[ Msg ] ->
-		    ?debug("sched:timeout(~p:~p): Rescheduling", [ DLMod, SvcName]),
+		[Msg] ->
+		    ?debug("timeout(~p:~p): Rescheduling", [DLMod, SvcName]),
 		    ets:delete(SvcRec#service.messages_tid, TransID),
-
 		    %% Calculate
-		    TOut = calc_relative_tout(Msg#message.timeout),
-
+		    TOut = calc_relative_tout(Msg),
 		    %% Has the message itself, not only the current
 		    %% data link attempt, timed out?
 		    case TOut =:= -1 of
 			true ->
 			    %% Yes!
-			    do_timeout_callback(St#st.cs, SvcName, TransID),
+			    tell_pid({rvi, schedule, message_timeout}, Msg),
 			    {noreply, St};
 			false ->
-
 			    %% Try to requeue message
-			    { _Res, NSt } =
+			    {_Res, NSt} =
 				queue_message(Msg,
-					      Msg#message.routes,
+					      Msg#entry.routes,
 					      St),
 			    {noreply, NSt}
 		    end;
-
 		_ ->
-		    ?info("sched:timeout(): trans_id(~p) service(~p): Yanked while processing",
-			  [ TransID, SvcName]),
-
+		    ?debug("timeout(): trans_id(~p) service(~p): "
+			   "Yanked while processing",
+			  [TransID, SvcName]),
 		    {noreply, St}
-
 	    end;
 	_ ->
-	    ?debug("sched:timeout(~p:~p): Unknown service", [ DLMod, SvcName]),
+	    ?debug("timeout(~p:~p): Unknown service", [DLMod, SvcName]),
 	    {noreply, St}
-
     end;
 
-
 handle_info(Info, St) ->
-    ?notice("sched:handle_info(): Unknown: ~p", [Info]),
-
+    ?debug("handle_info(): Unknown: ~p", [Info]),
     {noreply, St}.
 
 %%--------------------------------------------------------------------
@@ -398,25 +275,24 @@ code_change(_OldVsn, St, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
+tell_pid(Msg, #{pid := Pid}) when is_pid(Pid) ->
+    Pid ! Msg;
+tell_pid(_, _) ->
+    ignored.
 
 
 store_message(SvcRec, DataLinkMod, Message, RelativeTimeout) ->
-
-    { SvcName, _ } = SvcRec#service.key,
-
+    {SvcName, _} = SvcRec#service.key,
     TRef = erlang:send_after(RelativeTimeout, self(),
-			     { rvi_message_timeout,
-			       SvcName,
-			       DataLinkMod,
-			       Message#message.transaction_id }),
-
+			     {rvi_message_timeout,
+			      SvcName,
+			      DataLinkMod,
+			      Message#entry.transaction_id}),
     %% Add message to the service's queue, with an updated
-    %%  timeout ref.
+    %% timeout ref.
     ets:insert(SvcRec#service.messages_tid,
-	       Message#message { timeout_tref = TRef }),
-
+	       Message#entry{timeout_tref = TRef}),
     ok.
-
 
 %%
 %% No more routes to try, or no routes found at all
@@ -424,51 +300,44 @@ store_message(SvcRec, DataLinkMod, Message, RelativeTimeout) ->
 %%
 %% Stash the message in the unknown datalinvariant of the service
 %% and opportunistically send it if the service
-queue_message(#message{service = SvcName, timeout = Timeout} = Msg, [], St) ->
+queue_message(#{<<"service">> := SvcName,
+		normalized_name = Normalized,
+		<<"timeout">> := Timeout} = Msg, [], St) ->
 
     TOut = calc_relative_tout(Timeout),
     ?debug("sched:q(~s): No more routes. Will orphan for ~p seconds.",
-	   [ SvcName, TOut / 1000.0]),
+	   [SvcName, TOut / 1000.0]),
     %% Stash in Service / orphaned
-    SvcRec = find_or_create_service(SvcName, orphaned, St),
-
+    SvcRec = find_or_create_service(Normalized, orphaned, St),
     store_message(SvcRec,
 		  orphaned,
-		  Msg#message {
-		     data_link = undefined,
-		     protocol = undefined,
+		  #entry{
 		     routes =  [],
+		     message = Msg,
 		     timeout_tref = 0
-		    },
+		   },
 		  TOut),
     {ok, St};
 
 %% Try to queue message
-queue_message(#message{service = SvcName, timeout = Timeout} = Msg,
-	      [ { { ProtoMod, ProtoOpt }, { DLMod, DLOpt } }  | RemainingRoutes ],
+queue_message(#entry{service = SvcName, timeout = Timeout} = Msg,
+	      [{{ProtoMod, ProtoOpt}, {DLMod, DLOpt}} | RemainingRoutes],
 	      St) ->
-
     ?debug("sched:q(~p:~s): timeout:      ~p", [DLMod, SvcName, Timeout]),
-
     #service{key = {Service,_}} = SvcRec =
 	find_or_create_service(SvcName, DLMod, St),
-
-
     %%
     %% Bring up the relevant data link for the given route.
     %% Once up, the data link will invoke service_availble()
     %% to indicate that the service is available for the given DL.
     %%
-    Msg1 = Msg#message {
-	     data_link = { DLMod, DLOpt },
-	     protocol = { ProtoMod, ProtoOpt },
-	     routes =  RemainingRoutes,
+    Msg1 = Msg#entry{
+	     data_link = {DLMod, DLOpt},
+	     routes = RemainingRoutes,
 	     timeout_tref = 0
 	    },
-
     case DLMod:setup_data_link(St#st.cs, Service, DLOpt) of
-	[ ok, DLTimeout ] ->
-
+	{ok, DLTimeout} ->
 	    TOut = select_timeout(calc_relative_tout(Timeout), DLTimeout),
 	    ?debug("sched:q(~p:~s): ~p seconds to compe up.",
 		   [ DLMod, SvcName, TOut / 1000.0]),
@@ -499,12 +368,12 @@ queue_message(#message{service = SvcName, timeout = Timeout} = Msg,
 send_message(local, _,  _, _,   Msg, St) ->
 
     ?debug("sched:send_msg(local:~s). WIll send to local",
-	   [ Msg#message.service]),
+	   [ Msg#entry.service]),
 
     service_edge_rpc:handle_remote_message(St#st.cs,
-					   Msg#message.service,
-					   Msg#message.timeout,
-					   Msg#message.parameters),
+					   Msg#entry.service,
+					   Msg#entry.options,
+					   Msg#entry.parameters),
     {ok, St};
 
 %% Forward message to protocol.
@@ -512,18 +381,18 @@ send_message(DataLinkMod, DataLinkOpts,
 	     ProtoMod, ProtoOpts,
 	     Msg, St) ->
     ?debug("sched:send_msg(): ~p:~p:~p",
-	   [ProtoMod, DataLinkMod, Msg#message.service]),
+	   [ProtoMod, DataLinkMod, Msg#entry.service]),
 
     %% Send off message to the correct protocol module
     case ProtoMod:send_message(
 	   St#st.cs,
-	   Msg#message.transaction_id,
-	   Msg#message.service,
-	   Msg#message.timeout,
+	   Msg#entry.transaction_id,
+	   Msg#entry.service,
+	   Msg#entry.options,
 	   ProtoOpts,
 	   DataLinkMod,
 	   DataLinkOpts,
-	   Msg#message.parameters) of
+	   Msg#entry.parameters) of
 
 	%% Success
 	[ok] ->
@@ -533,10 +402,10 @@ send_message(DataLinkMod, DataLinkOpts,
 	%% Failed
 	[Err] ->
 	    ?info("sched:send_msg(): Failed: ~p:~p:~p -> ~p",
-		  [ProtoMod, DataLinkMod, Msg#message.service, Err]),
+		  [ProtoMod, DataLinkMod, Msg#entry.service, Err]),
 
 	    %% Requeue this message with the next route
-	    queue_message(Msg, Msg#message.routes, St)
+	    queue_message(Msg, Msg#entry.routes, St)
     end.
 
 
@@ -569,11 +438,11 @@ send_queued_messages(#service {
 
 	Msg->
 	    %% Wipe from ets table and cancel timer
-	    ets:delete(Tid, Msg#message.transaction_id),
-	    erlang:cancel_timer(Msg#message.timeout_tref),
+	    ets:delete(Tid, Msg#entry.transaction_id),
+	    erlang:cancel_timer(Msg#entry.timeout_tref),
 	    %% Extract the protocol / data link to use
-	    { DataLink, DataLinkOpts } = Msg#message.data_link,
-	    { Proto, ProtoOpts } = Msg#message.protocol,
+	    { DataLink, DataLinkOpts } = Msg#entry.data_link,
+	    { Proto, ProtoOpts } = Msg#entry.protocol,
 	    { _, NSt} = send_message(DataLink, DataLinkOpts,
 				     Proto, ProtoOpts,
 				     Msg, St),
@@ -667,12 +536,12 @@ send_orphaned_messages_(Protocol, ProtocolOpts,
 
 	Msg->
 	    %% Wipe from ets table and cancel timer
-	    ets:delete(Tid, Msg#message.transaction_id),
-	    erlang:cancel_timer(Msg#message.timeout_tref),
+	    ets:delete(Tid, Msg#entry.transaction_id),
+	    erlang:cancel_timer(Msg#entry.timeout_tref),
 
 	    ?debug("sched:send_orph(~p:~p): Sending Trans(~p) Pr(~p) PrOp(~p)  DlOp(~p)",
 		   [DataLinkMod, SvcName,
-		    Msg#message.transaction_id,
+		    Msg#entry.transaction_id,
 		    Protocol, ProtocolOpts, DataLinkOpts]),
 
 	    { _, NSt} = send_message( DataLinkMod, DataLinkOpts,
@@ -685,11 +554,11 @@ send_orphaned_messages_(Protocol, ProtocolOpts,
     end.
 
 
-find_service(<<"rvi:", Rest/binary>>, DLMod, #st{services_tid = SvcTid}) ->
+find_service(<<"$rvi/", Rest/binary>>, DLMod, #st{services_tid = SvcTid}) ->
     case re:split(Rest, <<"/">>, [{return, binary}]) of
 	[NodeId | _] ->
 	    ?debug("NodeId = ~p", [NodeId]),
-	    case ets:lookup(SvcTid, {<<"rvi:", NodeId/binary>>, DLMod}) of
+	    case ets:lookup(SvcTid, {<<"$rvi/", NodeId/binary>>, DLMod}) of
 		[] ->
 		    not_found;
 		[SvcRec] ->
@@ -698,29 +567,25 @@ find_service(<<"rvi:", Rest/binary>>, DLMod, #st{services_tid = SvcTid}) ->
 	_ ->
 	    not_found
     end;
-find_service(SvcName, DataLinkMod, #st { services_tid = SvcTid }) ->
+find_service(SvcName, DataLinkMod, #st{services_tid = SvcTid}) ->
     ?debug("sched:find_or_create_service(): ~p:~p", [ DataLinkMod, SvcName]),
-
-    case ets:lookup(SvcTid, { SvcName, DataLinkMod }) of
+    case ets:lookup(SvcTid, {SvcName, DataLinkMod }) of
 	[] ->  %% The given service does not exist, return not found
 	    not_found;
-
-	[ SvcRec ] ->  %%
+	[SvcRec] ->
 	    SvcRec
     end.
 
 find_or_create_service(SvcName, DataLinkMod, St) ->
-    ?debug("sched:find_or_create_service(): ~p:~p", [ DataLinkMod, SvcName]),
-
+    ?debug("sched:find_or_create_service(): ~p:~p", [DataLinkMod, SvcName]),
     case find_service(SvcName, DataLinkMod, St) of
 	not_found ->  %% The given service does not exist, create it.
-	    ?debug("sched:find_or_create_service(): Creating new ~p", [ SvcName]),
+	    ?debug("find_or_create_service(): Creating new ~p", [ SvcName]),
 	    update_service(SvcName, DataLinkMod, unavailable, St);
-
 	SvcRec ->
 	    %% Update the network address, if it differs, and return
 	    %% the new service / State as {ok, NSvcRec, false, NSt}
-	    ?debug("sched:find_or_create_service(): Updating existing ~p", [ SvcName]),
+	    ?debug("find_or_create_service(): Updating existing ~p", [SvcName]),
 	    SvcRec
     end.
 
@@ -728,61 +593,55 @@ find_or_create_service(SvcName, DataLinkMod, St) ->
 %% Warning: Will overwrite existing service (and its message table reference).
 %%
 update_service(SvcName, DataLinkMod, Available,
-	       #st { services_tid = SvcsTid, cs = CS }) ->
-    Key = {SvcName, DataLinkMod},
+	       #st{services_tid = SvcsTid, cs = CS}) ->
+    SvcKey = rvi_common:to_lower(SvcName),
+    Key = {SvcKey, DataLinkMod},
     MsgTID  =
 	case ets:lookup(SvcsTid, Key) of
 	    [] ->  %% The given service does not exist, create a new message TID
-		?debug("sched:update_service(~p:~p): ~p - Creating new",
-		       [ DataLinkMod, SvcName, Available]),
+		?debug("update_service(~p:~p): ~p - Creating new",
+		       [DataLinkMod, SvcName, Available]),
 		ets:new(rvi_messages,
-			[ ordered_set, private,
-			  { keypos, #message.transaction_id } ]);
-	    [ TmpSvcRec ] ->
-		%% Grab the existing messagae table ID
-		?debug("sched:update_service(~p:~p): ~p - Updating existing",
+			[ordered_set, private,
+			 {keypos, #entry.transaction_id}]);
+	    [TmpSvcRec] ->
+		%% Grab the existing message table ID
+		?debug("update_service(~p:~p): ~p - Updating existing",
 		       [ DataLinkMod, SvcName, Available]),
-
-		#service { messages_tid = TID } = TmpSvcRec,
+		#service{messages_tid = TID} = TmpSvcRec,
 		TID
 	end,
-
     %% Insert new service to ets table.
-    SvcRec = #service {
-		key = { SvcName, DataLinkMod },
+    SvcRec = #service{
+		key = {SvcKey, DataLinkMod},
+		service = SvcName,
 		available = Available,
 		messages_tid = MsgTID,
 		cs = CS
 	       },
-
     ets:insert(SvcsTid, SvcRec),
     SvcRec.
-
 
 %% Create a new and unique transaction id
 create_transaction_id(St) ->
     ?debug("sched:create_transaction_id(~p): ", [  St#st.next_transaction_id ]),
     ID = St#st.next_transaction_id,
 
-    %% FIXME: Maybe interate pid into transaction to handle multiple
+    %% FIXME: Maybe integrate pid into transaction to handle multiple
     %% schedulers?
-    { ID, St#st { next_transaction_id = ID + 1 }}.
+    {ID, St#st{next_transaction_id = ID + 1}}.
 
 %% Calculate a relative timeout based on the Msec UnixTime TS we are
 %% provided with.
-calc_relative_tout(UnixTimeMS) ->
+calc_relative_tout(#{<<"timeout">> := UnixTimeMS}) ->
     Now = erlang:system_time(milli_seconds),
     ?debug("sched:calc_relative_tout(): TimeoutUnixMS(~p) - Now(~p) = ~p",
-	   [ UnixTimeMS, Now, UnixTimeMS - Now ]),
-
-
+	   [UnixTimeMS, Now, UnixTimeMS - Now]),
     %% Cap the timeout value at something reasonable
     TOut = UnixTimeMS - Now,
-
     case TOut =< 0 of
 	true ->
 	    -1; %% We have timed out
-
 	false ->
 	    TOut
     end.
@@ -791,8 +650,6 @@ calc_relative_tout(UnixTimeMS) ->
 do_timeout_callback(CompSpec, SvcName, TransID) ->
     service_edge_rpc:handle_local_timeout(CompSpec, SvcName, TransID),
     ok.
-
-
 
 %% Kill off a service that is no longer used.
 %%
@@ -806,25 +663,23 @@ delete_unused_service(SvcTid, SvcRec) ->
 
 	    %% Update the network address, if it differs, and return
 	    %% the new service / State as {ok, NSvcRec, false, NSt}
-	    ?debug("sched:service_unavailable(): Service ~p now has no address.",
-		   [ SvcRec#service.key ]),
+	    ?debug("service_unavailable(): Service ~p now has no address.",
+		   [SvcRec#service.key]),
 	    true;
-
-	_ -> false
+	_ ->
+	    false
     end.
 
-first_service_message(#service {  messages_tid = Tid }) ->
+first_service_message(#service{messages_tid = Tid}) ->
     case ets:first(Tid) of
 	'$end_of_table' ->
 	    empty;
-
 	Key ->
 	    case ets:lookup(Tid, Key) of
-		[ Msg ] -> Msg;
-		[] -> yanked
+		[Msg] -> Msg;
+		[]    -> yanked
 	    end
     end.
-
 
 %% A timeout of -1 means 'does not apply'
 %%
@@ -833,18 +688,17 @@ first_service_message(#service {  messages_tid = Tid }) ->
 %% If both timeouts are specified, we select the shortest one.
 %%
 select_timeout(TimeOut1, TimeOut2) ->
-
     case { TimeOut1 =:= -1, TimeOut2 =:= -1 } of
-	{ true, true } -> 1;
-
-	{ true, false } -> TimeOut2;
-
-	{ false, true } -> TimeOut1;
-
-	{ false, false } -> min(TimeOut1, TimeOut2)
+	{true, true}	-> 1;
+	{true, false}	-> TimeOut2;
+	{false, true}	-> TimeOut1;
+	{false, false}	-> min(TimeOut1, TimeOut2)
     end.
 
-log([ID], Fmt, Args) ->
-    rvi_log:log(ID, <<"schedule">>, rvi_log:format(Fmt, Args));
+log(#{} = R, Fmt, Args) ->
+    rvi_log:log(R, <<"schedule">>, rvi_log:format(Fmt, Args));
 log(_, _, _) ->
     ok.
+
+to_lower(Str) ->
+    rvi_common:to_lower(Str).

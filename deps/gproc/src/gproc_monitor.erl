@@ -58,7 +58,7 @@
 %% sent immediately, indicating the current status of the name.
 %% @end
 %%--------------------------------------------------------------------
-subscribe({T,S,_} = Key) when (T==n orelse T==a)
+subscribe({T,S,_} = Key) when (T==n orelse T==a orelse T==rc)
 			      andalso (S==g orelse S==l) ->
     try gproc:reg({p,l,{?MODULE,Key}})
     catch

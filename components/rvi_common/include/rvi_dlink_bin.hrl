@@ -6,10 +6,12 @@
 %% Mozilla Public License is at https://www.mozilla.org/MPL/2.0/
 %%
 
+-define(DLINK_VERSION, <<"1.0">>).
+
 %% Commonly used protocol identifiers across dlink implementations
 %%
 -define(DLINK_CMD_AUTHORIZE,        <<"au">>).
--define(DLINK_CMD_CRED_EXCHANGE,    <<"cre">>).
+-define(DLINK_CMD_CRED_EXCHANGE,    <<"cre">>).  % FIXME! Remove
 -define(DLINK_CMD_SERVICE_ANNOUNCE, <<"sa">>).
 -define(DLINK_CMD_RECEIVE,          <<"rcv">>).
 -define(DLINK_CMD_FRAG,             <<"frg">>).
@@ -23,11 +25,19 @@
 -define(DLINK_ARG_VERSION,          <<"ver">>).
 -define(DLINK_ARG_CREDENTIAL,       <<"cred">>).
 -define(DLINK_ARG_CREDENTIALS,      <<"creds">>).
+-define(DLINK_ARG_DELEGATES,        <<"dels">>).
 -define(DLINK_ARG_SIGNATURE,        <<"sign">>).
 -define(DLINK_ARG_SERVICES,         <<"svcs">>).
 -define(DLINK_ARG_MODULE,           <<"mod">>).
 -define(DLINK_ARG_AVAILABLE,        <<"av">>).
 -define(DLINK_ARG_UNAVAILABLE,      <<"un">>).
 -define(DLINK_ARG_COST,             <<"cost">>).
+-define(DLINK_ARG_ENC,              <<"enc">>).
+-define(DLINK_ARG_SRC,              <<"src">>).
+-define(DLINK_ARG_TIMEOUT,          <<"timeout">>).
+-define(DLINK_ARG_ROUTE,            <<"route">>).
+-define(DLINK_ARG_SYNC,             <<"synch">>).
+-define(DLINK_ARG_REPLY_ID,         <<"reply_id">>).
 -define(DLINK_ARG_STATUS,           <<"stat">>).
 -define(DLINK_ARG_DATA,             <<"data">>).
+-define(DLINK_ARG_LOG_ID,           <<"log_id">>).

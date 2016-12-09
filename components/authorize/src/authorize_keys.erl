@@ -21,7 +21,8 @@
 -export([cache_authorizations/1,
 	 remove_cached_authorizations/1,
 	 remove_cached_authorizations_for_conn/1,
-	 update_authorization_cache/2]).
+	 update_authorization_cache/2,
+	 authorized_services_for_conn/1]).
 
 -export([remove_connection/1]).
 
@@ -161,6 +162,9 @@ remove_cached_authorizations_for_conn(Conn) ->
 
 update_authorization_cache(Conn, CS) ->
     gen_server:cast(?MODULE, {update_authorization_cache, Conn, CS}).
+
+authorized_services_for_conn(Conn) ->
+    authorized_services_for_conn_(normalize_conn(Conn)).
 
 remove_connection(Conn) ->
     gen_server:cast(?MODULE, {remove_connection, Conn}).
@@ -304,30 +308,34 @@ to_bin(I) when is_integer(I) -> integer_to_binary(I).
 
 filter_by_service_(Services, Conn0) ->
     Conn = normalize_conn(Conn0),
-    ?debug("Filter: creds = ~p", [[{K,abbrev_payload(V)} || {K,V} <- ets:tab2list(?CREDS)]]),
+    ?debug("Filter: creds = ~p", [[{K,abbrev_payload(V)}
+				   || {K,V} <- ets:tab2list(?CREDS)]]),
     Invoke = ets:select(?CREDS, [{ {{Conn,'_'}, #cred{right_to_invoke = '$1',
 						      _ = '_'}},
 				  [], ['$1'] }]),
     ?debug("Services by conn (~p) -> ~p~n", [Conn, Invoke]),
-    filter_svcs_(Services, Invoke).
+    filter_svcs_(invokable_services(Services), Invoke).
 
-filter_svcs_([S|Svcs], Invoke) ->
-    case lists:any(fun(Ds) ->
-			   lists:any(
-			     fun(D) ->
-				     match_svc(D, S)
-			     end, Ds)
-		   end, Invoke) of
-	true ->
-	    [S|filter_svcs_(Svcs, Invoke)];
-	false ->
-	    filter_svcs_(Svcs, Invoke)
-    end;
-filter_svcs_([], _) ->
-    [].
+invokable_services(Svcs) ->
+    Receive = ets:select(
+		?CREDS, [{ {{local,'_'}, #cred{right_to_receive = '$1',
+					       _ = '_'}},
+			   [], ['$1'] }]),
+    filter_svcs_(Svcs, Receive).
+
+filter_svcs_(Svcs, Invoke) ->
+    lists:filter(fun(S) -> filter_svc_(S, Invoke) end, Svcs).
+
+filter_svc_(S, Invoke) ->
+    lists:any(fun(Ds) ->
+		      lists:any(
+			fun(D) ->
+				match_svc(D, S)
+			end, Ds)
+	      end, Invoke).
 
 find_cred_by_service_(Service) ->
-    SvcParts = split_path(strip_prot(Service)),
+    SvcParts = split_path(Service),
     LocalCreds = ets:select(?CREDS, [{ {{local,'_'}, '$1'}, [], ['$1'] }]),
     ?debug("find_creds_by_service(~p~nLocalCreds = ~p~n",
 	   [Service, [{Id,Rcv,Inv} || #cred{id = Id,
@@ -350,7 +358,7 @@ find_cred_by_service_(Service) ->
 
 match_length(Invoke, Svc) ->
     R = lists:foldl(fun(D, Max) ->
-			    DParts = split_path(strip_prot(D)),
+			    DParts = split_path(D),
 			    erlang:max(match_length_(DParts, Svc), Max)
 		    end, 0, Invoke),
     ?debug("match_length(~p,~p) -> ~p~n", [Invoke, Svc, R]),
@@ -373,19 +381,14 @@ match_length_([], _, L) ->
     L.
 
 match_svc(D, S) ->
-    A = split_path(strip_prot(D)),
-    B = split_path(strip_prot(S)),
+    A = split_path(D),
+    B = split_path(S),
     ?debug("match_svc_(~p, ~p)~n", [A, B]),
     match_svc_(A, B).
 
-strip_prot(P) ->
-    case re:split(P, ":", [{return,list}]) of
-	[_] -> P;
-	[_,Rest] -> Rest
-    end.
-
+%% Service name comparisons are case-insensitive; normalize to lowercase
 split_path(P) ->
-    re:split(P, "/", [{return, list}]).
+    [string:to_lower(X) || X <- re:split(P, "/", [{return, list}])].
 
 match_svc_([H|T], [H|T1]) ->
     match_svc_(T, T1);
@@ -621,52 +624,66 @@ check_validity(Start, Stop, UTC) ->
 
 validate_service_call_(Svc, Conn) ->
     Res =
-	case lists:filter(fun(C) ->
-				  can_invoke(Svc, C)
-			  end, cred_recs_by_conn(Conn)) of
-	    [] ->
-		invalid;
-	    [#cred{id = ID}|_] ->
-		{ok, ID}
+	case can_be_invoked(Svc) of
+	    true ->
+		case lists:filter(fun(C) ->
+					  can_invoke(Svc, C)
+				  end, cred_recs_by_conn(Conn)) of
+		    [] ->
+			invalid;
+		    [#cred{id = ID}|_] ->
+			{ok, ID}
+		end;
+	    false ->
+		invalid
 	end,
     ets:insert(?CACHE, {{Svc, Conn}, Res}),
     Res.
 
-cache_authorizations_(Svcs) ->
-    CacheEntries = ets:foldl(
-		     fun(CEntry, Acc) ->
-			     lists:foldr(
-			       fun(Svc, Acc1) ->
-				       cache_authorization_entry(
-					 CEntry, Svc, Acc1)
-			       end, Acc, Svcs)
-		     end, [], ?CREDS),
-    ets:insert(?CACHE, CacheEntries),
+cache_authorizations_(Svcs0) ->
+    Svcs = invokable_services(Svcs0),  % for which we have right_to_receive
+    DefaultInvalid = Svcs0 -- Svcs,
+    {Conns, CacheEntries} =
+	ets:foldl(
+	  fun(CEntry, Acc) ->
+		  lists:foldr(
+		    fun(Svc, Acc1) ->
+			    cache_authorization_entry(CEntry, Svc, Acc1)
+		    end, Acc, Svcs)
+	  end, {sets:new(), dict:new()}, ?CREDS),
+    %% Also cache, for all conns, 'invalid' for all services, where we don't
+    %% have right_to_receive
+    FillInvalid =
+	lists:foldr(
+	  fun(C, Acc) ->
+		  lists:foldr(
+		    fun(S, Acc1) ->
+			    [{{S,C}, invalid}|Acc1]
+		    end, Acc, DefaultInvalid)
+	  end, [], Conns),
+    ets:insert(?CACHE, CacheEntries ++ FillInvalid),
     ?debug("auth cache: ~p", [ets:tab2list(?CACHE)]),
     ok.
 
-cache_authorization_entry(Entry, Svc, Acc) ->
+cache_authorization_entry({{Conn,ID}, C} = Entry, Svc, {Cs,Auth} = Acc) ->
     ?debug("cache_authorization_entry(~p, ~p)", [Entry, Svc]),
-    case {Entry, Acc} of
-	{{{Conn, _}, _C}, [{{Svc, Conn}, {ok,_}}|_]} ->
+    case dict:find({Svc, Conn}, Acc) of
+	{ok, {ok,_}} ->
 	    Acc;
-	{{{Conn, ID}, C}, Acc} ->
+	{ok, invalid} ->
 	    case can_invoke(Svc, C) of
-		true  ->
-		    case Acc of
-			[{{Svc, Conn}, invalid}|Rest] ->
-			    [{{Svc, Conn}, {ok, ID}}|Rest];
-			_ ->
-			    [{{Svc, Conn}, {ok, ID}}|Acc]
-		    end;
+		true ->
+		    {Cs, dict:store({Svc, Conn}, {ok, ID}, Auth)};
 		false ->
-		    case Acc of
-			[{{Svc, Conn}, invalid}|_] ->
-			    Acc;
-			_ ->
-			    [{{Svc, Conn}, invalid}|Acc]
-		    end
-	    end
+		    Acc
+	    end;
+	error ->
+	    Cs1 = sets:store(Conn, Cs),
+	    Res = case can_invoke(Svc, C) of
+		      true  -> {ok, ID};
+		      false -> invalid
+		  end,
+	    {Cs1, dict:store({Svc, Conn}, Res, Auth)}
     end.
 
 remove_cached_authorizations_(Svc) ->
@@ -683,12 +700,24 @@ update_authorization_cache_(Conn, CS) ->
       end, Svcs),
     ?debug("auth cache: ~p", [ets:tab2list(?CACHE)]).
 
+
+authorized_services_for_conn_(Conn) ->
+    ets:select(?CACHE, [{ {{'$1', Conn}, {ok, '_'}}, [], ['$1'] }]).
+
 remove_cached_authorizations_for_conn_(Conn) ->
     ets:select_delete(?CACHE, [{ {{'_', Conn}, '_'}, [], [true] }]),
     ok.
 
+%% NOTE: this doesn't check whether we have right_to_receive
 can_invoke(Svc, #cred{right_to_invoke = In}) ->
     lists:any(fun(I) -> match_svc(I, Svc) end, In).
+
+can_be_invoked(Svc) ->
+    Receive = ets:select(
+		?CREDS, [{ {{local,'_'}, #cred{right_to_receive = '$1',
+					       _ = '_'}},
+			   [], ['$1'] }]),
+    filter_svc_(Svc, Receive).
 
 pp_key(#'RSAPrivateKey'{modulus = Mod, publicExponent = Pub}) ->
     P = integer_to_binary(Pub),

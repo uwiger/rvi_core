@@ -19,8 +19,8 @@
                   dlink,
                   ssl
                  ]},
-  {mod, { dlink_tls_app, []}},
-  {start_phases, [{json_rpc, []}, {connection_manager, []}, {announce, []}]},
+  {mod, {dlink_tls_app, []}},
+  {start_phases, [{announce, []}]},
   {env, [
 	 {rvi_core_await, [{n,l,dlink_tls}]}
 	]}

@@ -24,7 +24,7 @@
 -module(wse_server).
 -include_lib("lager/include/log.hrl").
 
--export([start/4, start/5,  stop/1]).
+-export([start/3, start/4,  stop/1]).
 -export([ws_loop/3]).
 -export([send/2]).
 -export([close/1]).
@@ -67,21 +67,21 @@
 	  fs   = [],            %% fragments
 	  wait = [],            %% #event
 	  header,               %% ws_header
-	  cb = {undefined, undefined, undefined }
+	  mod :: atom(),        %% callback module
+	  mod_st :: any(),      %% callback module state
+	  parent
 	}).
-
-
 
 %% start()
 %%  This should be in another module for clarity
 %%  but is included here to make the example self-contained
 
 
-start(Port, M, F, A) when is_integer(Port) ->
-    start_([{cb, {M,F,A}}, {port,Port}]).
+start(Port, Mod, InitArg) when is_integer(Port) ->
+    start_([{cb, {Mod, InitArg}, {port,Port}]).
 
-start(Port,M,F,A, Opts) when is_integer(Port) ->
-    start_([{port,Port}, {cb, {M,F,A}}] ++ Opts).
+start(Port, Mod, InitArg, Opts) when is_integer(Port) ->
+    start_([{port,Port}, {cb, {Mod, InitArg}}] ++ Opts).
 
 start_(Opts) -> spawn(fun() -> init(Opts) end).
 
@@ -144,7 +144,6 @@ accept(Parent, Listen, Opts) ->
 	    Parent ! {self(), Error}
     end.
 
-
 send(Pid, Data) ->
     try
 	Pid ! { send, Data },
@@ -155,7 +154,6 @@ send(Pid, Data) ->
 	    {error, Reason}
     end.
 
-
 close(Pid) ->
     try
 	Pid ! close,
@@ -164,7 +162,6 @@ close(Pid) ->
 	_:_ -> %% Already closed
 	    ok
     end.
-
 
 %%
 ws_encode(Term,?WS_OP_BINARY) ->
@@ -230,16 +227,21 @@ ws_handshake(Socket, _Uri, Opts) ->
 		       text -> ?WS_OP_TEXT
 		   end,
 	    %% Store header in process dictionary for direct access
+	    Parent = get(parent),
 	    put(header, F#ws_header.hs),
+	    {Mod, InitArg} = proplists:get_value(cb, Opts, {?MODULE, []}),
+	    {ok, MSt} = Mod:ws_init(InitArg),
 	    S0 = #s {proto=WsProto,
 		     type=Type,
 		     pingInterval=PingInterval,
 		     pongTimeout=PongTimeout,
 		     header = F,
-		     cb = proplists:get_value(cb, Opts, {undefined, undefined, undefined})
+		     mod = Mod,
+		     mod_st = MSt,
+		     parent = Parent
 		    },
 	    S1 = start_ping_timer(S0),
-	    ws_loop(<<>>, Socket, S1);
+	    ws_loop(<<>>, Socket, S1#s{mod_st = MSt});
 	true ->
 	    ws_error({error, missing_key})
     end.
@@ -280,7 +282,7 @@ ws_recv_headers(S, F, Timeout) ->
 
 
 
-ws_loop(Buf, Socket, S) ->
+ws_loop(Buf, Socket, #s{} = S) ->
     receive
 	%% WebSocket stuff
 	{tcp, Socket, Data} ->
@@ -291,9 +293,15 @@ ws_loop(Buf, Socket, S) ->
 	    exit(closed);
 
 	{'EXIT',Pid,Reason} ->
-	    case get(parent) of
-		Pid ->
+	    case Pid of
+		S#s.parent ->
 		    ?debug("exit from parent ~w reason=~p\n", [Pid, Reason]),
+		    exit(Reason);
+		_ ->
+
+		S#s.msg_handler ->
+		    ?debug("exit from msg_handler ~p reason=~p\n",
+			   [Pid, Reason]),
 		    exit(Reason);
 		_ ->
 		    ?debug("exit from ~w reason=~p\n", [Pid, Reason]),
@@ -453,17 +461,18 @@ handle_remote({close,Data}, Socket, S0) ->
        S0#s.closing =:= false ->
 	    ?debug("got close ~p, client closing", [Data]),
 	    gen_tcp:send(Socket, ws_make_server_frame(Data,?WS_OP_CLOSE)),
-	    S0#s { closing = client }
+	    S0#s{closing = client}
     end;
 
-handle_remote({mesg, Mesg}, _Socket, #s { cb = {M,F,A} } = S) ->
+handle_remote({mesg, Mesg}, _Socket, #s{mod = Mod, mod_st = MSt} = S) ->
+    %% Send to message handler rather than spawning a handler for each.
+    %% This makes it possible to preserve message order in handler code.
     %% Parameters are delivered as JSON. Decode into tuple
-    _Pid = spawn_link(M,F,[self(), Mesg, A ]),
+    {ok, MSt} = Mod:ws_message(Mesg, MSt),
     S.
 handle_mesg(_Other, _Socket, S0) ->
     ?debug("unknown mesg ~p\n", [_Other]),
     S0.
-
 
 start_ping_timer(S0) ->
     if is_integer(S0#s.pingInterval),S0#s.pingInterval>0 ->
@@ -494,4 +503,11 @@ stop_pong_timer(S0) ->
 	    S0#s { pong_tmr = undefined };
        true ->
 	    S0
+    end.
+
+msg_loop(#ms{mod = Mod, mod_st = MSt, parent = Parent} = S) ->
+    receive
+	{mesg, Mesg} ->
+	    {ok, MSt1} = Mod:ws_message(Parent, Mesg, MSt),
+	    msg_loop(S#ms{mod_st = MSt1})
     end.

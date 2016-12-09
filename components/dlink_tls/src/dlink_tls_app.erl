@@ -29,14 +29,6 @@ start(_StartType, _StartArgs) ->
 start_phase(init, _, _) ->
     dlink_tls_rpc:init_rvi_component();
 
-start_phase(json_rpc, _, _) ->
-    dlink_tls_rpc:start_json_server(),
-    ok;
-
-start_phase(connection_manager, _, _) ->
-    dlink_tls_rpc:start_connection_manager(),
-    ok;
-
 start_phase(announce, _, _) ->
     rvi_common:announce({n, l, dlink_tls}).
 

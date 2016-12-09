@@ -1,3 +1,4 @@
+%% -*- erlang-indent-level: 4; indent-tabs-mode: nil -*-
 %%
 %% Copyright (C) 2014, Jaguar Land Rover
 %%
@@ -8,30 +9,35 @@
 
 
 -module(dlink_tls_rpc).
--behavior(gen_server).
+-behavior(dlink_gen_rpc).
 
--export([handle_rpc/2]).
--export([handle_notification/2]).
 -export([handle_socket/6]).
 -export([handle_socket/5]).
 
 -export([start_link/0]).
--export([init/1, handle_call/3, handle_cast/2, handle_info/2,
-	 terminate/2, code_change/3]).
-
--export([start_json_server/0]).
--export([start_connection_manager/0]).
+-export([dlink_init/1, handle_call/3, handle_cast/2, handle_info/2,
+         terminate/2, code_change/3]).
 
 %% Invoked by service discovery
 %% FIXME: Should be rvi_service_discovery behavior
--export([service_available/3,
-	 service_unavailable/3]).
--export([connections/1]).
+-export([service_available/2,
+         service_unavailable/2]).
+-export([connections/0]).
 
--export([setup_data_link/3,
-	 disconnect_data_link/2,
-	 send_data/5]).
+-export([setup_data_link/2,
+         disconnect_data_link/1,
+         send_data/4]).
 
+-export([peername/2,
+         log_info/1,
+         socket_tags/1,
+         encodings/1,
+         tls_opts/1,
+         conn_init/4,
+         listen/3,
+         accept/2,
+         connect/4,
+         setopts/3]).
 
 -include_lib("lager/include/log.hrl").
 -include_lib("rvi_common/include/rvi_common.hrl").
@@ -52,228 +58,165 @@
 %% Multiple registrations of the same service, each with a different connection,
 %% is possible.
 -record(service_entry, {
-	  service = [],           %% Name of service
-	  connections = undefined  %% PID of connection that can reach this service
-	 }).
+          service = [],           %% Name of service
+          connections = undefined  %% PID of connection that can reach this service
+         }).
 
 -record(connection_entry, {
-	  connection = undefined, %% PID of connection that has a set of services.
-	  services = []     %% List of service names available through this connection
-	 }).
+          connection = undefined, %% PID of connection that has a set of services.
+          services = []     %% List of service names available through this connection
+         }).
 
 -record(st, {
-	  cs = #component_spec{},
-	  tid = 1
-	 }).
+          log_id,
+          cs = #component_spec{},
+          tid = 1
+         }).
 
+
+%% ==================================================
+%% Callbacks for dlink_gen_rpc and dlink_conn
+
+dlink_init([]) ->
+    {ok, []}.
+
+%% log_info(ModState) -> {Prefix, ComponentName}.
+log_info(_) -> {<<"conn">>, <<"dlink_tls">>}.
+
+peername(Sock, _MSt) ->
+    {ok, {IP, Port}} = inet:peername(Sock),
+    {inet_parse:ntoa(IP), Port}.
+
+encodings(_ModSt) ->
+    [<<"msgpack">>, <<"json">>].
+
+tls_opts(_MSt) ->
+    [].
+
+socket_tags(_MSt) ->  #{tcp_closed      => closed,
+                        tcp             => data,
+                        tcp_error       => error}.
+
+conn_init(_Op, _IP, _Port, _Args) ->
+    {ok, []}.
+
+listen(Port, Opts, MSt) ->
+    {ok, LS} =
+        gen_tcp:listen(
+          Port, [binary, {reuseaddr, true}, {nodelay, true}
+                 | [O || {K,_} = O <- Opts -- [binary, list],
+                         not lists:member(K, [port,reuseaddr,nodelay])]]),
+    {ok, LS, MSt}.
+
+accept(LS, MSt) ->
+    {ok, S} = gen_tcp:accept(LS),
+    {ok, S, MSt}.
+
+connect(IP, Port, Timeout, MSt) ->
+    case gen_tcp:connect(IP, Port, [binary, {nodelay, true}], Timeout) of
+        {ok, S} ->
+            {ok, S, MSt};
+        {error, _} = Other ->
+            Other
+    end.
+
+closed(_Sock, _MSt) ->
+    ok.
+
+setopts(Sock, Opts, MSt) ->
+    {inet:setopts(Sock, Opts), MSt}.
+
+%% End callbacks
+%% ==================================================
 
 start_link() ->
-    gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
+    dlink_gen_rpc:start_link(?SERVER, ?MODULE, []).
 
-init([]) ->
-    ?info("dlink_tls:init(): Called"),
-    %% Dig out the bert rpc server setup
+service_available(SvcName, DataLinkModule) ->
+    dlink_gen_rpc:service_available(SvcName, DataLinkModule, ?MODULE).
 
-    ets:new(?SERVICE_TABLE, [ set, public, named_table,
-			     { keypos, #service_entry.service }]),
+service_unavailable(SvcName, DataLinkModule) ->
+    dlink_gen_rpc:service_unavailable(SvcName, DataLinkModule, ?MODULE).
 
-    ets:new(?CONNECTION_TABLE, [ set, public, named_table,
-				 { keypos, #connection_entry.connection }]),
+connections() ->
+    dlink_conn:connections(?MODULE).
 
-    CS = rvi_common:get_component_specification(),
-    service_discovery_rpc:subscribe(CS, ?MODULE),
+setup_data_link(Service, Opts) ->
+    call({setup_data_link, Service, Opts}).
 
-    {ok, #st {
-	    cs = CS
-	   }
-    }.
+disconnect_data_link(NetworkAddress) ->
+    call({disconnect_data_link, NetworkAddress}).
 
-start_json_server() ->
-    rvi_common:start_json_rpc_server(data_link, ?MODULE, dlink_tls_sup).
-
-
-start_connection_manager() ->
-    CompSpec = rvi_common:get_component_specification(),
-    {ok, TlsOpts} = rvi_common:get_module_config(data_link,
-						 ?MODULE,
-						 ?SERVER_OPTS,
-						 [],
-						 CompSpec),
-    ?debug("TlsOpts = ~p", [TlsOpts]),
-    ?info("dlink_tls:init_rvi_component(~p): Starting listener.", [self()]),
-
-    %% Fire up listener
-    %% dlink_tls_connmgr:start_link(),
-    %% {ok,Pid} = dlink_tls_listener:start_link(),
-
-    setup_initial_listeners(TlsOpts, CompSpec),
-
-    ?info("dlink_tls:init_rvi_component(): Setting up persistent connections."),
-
-    {ok, PersistentConnections } = rvi_common:get_module_config(data_link,
-								?MODULE,
-								?PERSISTENT_CONNECTIONS,
-								[],
-								CompSpec),
-    setup_persistent_connections_(PersistentConnections, CompSpec),
-    ok.
-
-setup_initial_listeners([], _CompSpec) ->
-    ?debug("no initial listeners", []);
-setup_initial_listeners([_|_] = TlsOpts, CompSpec) ->
-    case lists:keytake(ports, 1, TlsOpts) of
-	{value, {_, Ports}, Rest} ->
-	    setup_initial_listeners_(Rest, CompSpec),
-	    [setup_initial_listeners_(
-	       [{port,P}|inherit_opts([ip, ifaddr], TlsOpts, POpts)], CompSpec)
-	     || {P, POpts} <- Ports];
-	false ->
-	    setup_initial_listeners_(TlsOpts, CompSpec)
-    end.
-
-inherit_opts(Keys, From, To) ->
-    Pick = [{K,V} || {K, V} <- From,
-		     lists:member(K, Keys),
-		     not lists:keymember(K, 1, To)],
-    Pick ++ To.
-
-setup_initial_listeners_([], _CompSpec) ->
-    ok;
-setup_initial_listeners_([_|_] = TlsOpts, CompSpec) ->
-    IP = proplists:get_value(ip, TlsOpts, ?DEFAULT_TCP_ADDRESS),
-    Port = proplists:get_value(port, TlsOpts, ?DEFAULT_TCP_PORT),
-    setup_listener(IP, Port, TlsOpts, CompSpec).
-
-setup_listener(IP, Port, Opts, CompSpec) ->
-    %% Add listener port.
-    ?info("dlink_tls:init_rvi_component(): Adding listener ~p:~p", [ IP, Port ]),
-    case dlink_tls_listener:add_listener(IP, Port, Opts, CompSpec) of
-	ok ->
-	    ?notice("---- RVI Node External Address: ~s",
-		    [ application:get_env(rvi_core, node_address, undefined)]);
-
-	Err ->
-	    ?error("dlink_tls:init_rvi_component(): Failed to launch listener: ~p", [ Err ]),
-	    ok
-    end.
-
-setup_persistent_connections_([ ], _CompSpec) ->
-     ok;
-
-
-setup_persistent_connections_([ NetworkAddress | T], CompSpec) ->
-    ?debug("~p: Will persistently connect connect : ~p", [self(), NetworkAddress]),
-    [ IP, Port] =  string:tokens(NetworkAddress, ":"),
-    %% cast an immediate (re-)connect attempt to dlink_tls_rpc
-    setup_reconnect_timer(0, IP, Port, CompSpec),
-    setup_persistent_connections_(T, CompSpec),
-    ok.
-
-service_available(CompSpec, SvcName, DataLinkModule) ->
-    rvi_common:notification(data_link, ?MODULE,
-			    service_available,
-			    [{ service, SvcName },
-			     { data_link_module, DataLinkModule }],
-			    CompSpec).
-
-service_unavailable(CompSpec, SvcName, DataLinkModule) ->
-    rvi_common:notification(data_link, ?MODULE,
-			    service_unavailable,
-			    [{ service, SvcName },
-			     { data_link_module, DataLinkModule }],
-			    CompSpec).
-
-connections(_CompSpec) ->
-    rvi_common:request(data_link, ?MODULE, connections, []).
-
-setup_data_link(CompSpec, Service, Opts) ->
-    rvi_common:request(data_link, ?MODULE, setup_data_link,
-		       [ { service, Service },
-			 { opts, Opts }],
-		       [status, timeout], CompSpec).
-
-disconnect_data_link(CompSpec, NetworkAddress) ->
-    rvi_common:request(data_link, ?MODULE, disconnect_data_link,
-		       [ {network_address, NetworkAddress} ],
-		       [status], CompSpec).
-
-
-send_data(CompSpec, ProtoMod, Service, DataLinkOpts, Data) ->
-    rvi_common:request(data_link, ?MODULE, send_data,
-			    [ { proto_mod, ProtoMod },
-			      { service, Service },
-			      { data, Data },
-			      { opts, DataLinkOpts }
-			     ],
-		       [status], CompSpec).
+send_data(_ProtoMod, Service, DataLinkOpts, Data) ->
+    call({send_data, Service, Data, DataLinkOpts}).
 
 %% End of behavior
 
 %%
 %% Connect to a remote RVI node.
 %%
-connect_remote(IP, Port, CompSpec) ->
+connect_remote(IP, Port) ->
     ?info("connect_remote(~p, ~p)~n", [IP, Port]),
     case dlink_tls_connmgr:find_connection_by_address(IP, Port) of
-	{ ok, _Pid } ->
-	    log("already connected", [], CompSpec),
-	    already_connected;
+        {ok, _Pid} ->
+            log("already connected", []),
+            already_connected;
+        not_found ->
+            %% Setup a new outbound connection
+            {ok, Timeout} =
+                rvi_common:get_module_config(
+                  data_link, ?MODULE, connect_timeout, 10000),
+            ?info("connect_remote(): Connecting ~p:~p (TO=~p",
+                  [IP, Port, Timeout]),
+            log("new connection", []),
+            case gen_tcp:connect(IP, Port, dlink_tls_listener:sock_opts(),
+                                 Timeout) of
+                {ok, Sock} ->
+                    ?info("connect_remote(): Connected ~p:~p",
+                          [IP, Port]),
 
-	not_found ->
-	    %% Setup a new outbound connection
-	    {ok, Timeout} = rvi_common:get_module_config(
-			      data_link, ?MODULE, connect_timeout, 10000, CompSpec),
-	    ?info("dlink_tls:connect_remote(): Connecting ~p:~p (TO=~p",
-		  [IP, Port, Timeout]),
-	    log("new connection", [], CompSpec),
-	    case gen_tcp:connect(IP, Port, dlink_tls_listener:sock_opts(),
-				 Timeout) of
-		{ ok, Sock } ->
-		    ?info("dlink_tls:connect_remote(): Connected ~p:~p",
-			   [IP, Port]),
-
-		    %% Setup a genserver around the new connection.
-		    {ok, Pid } = dlink_tls_conn:setup(client, IP, Port, Sock,
-						      ?MODULE, handle_socket, CompSpec),
-		    try dlink_tls_conn:upgrade(Pid, client) of
-			ok ->
-			    ?debug("Upgrade result = ~p", [ok]),
-			    %% Send authorize
-			    send_authorize(Pid, CompSpec),
-			    ok
-		    catch
-			error:Error ->
-			    ?error("TLS upgrade (~p,~p) failed ~p",
-				   [IP, Port, Error]),
-			    not_available
-		    end;
-		{error, Err } ->
-		    ?info("dlink_tls:connect_remote(): Failed ~p:~p: ~p",
-			   [IP, Port, Err]),
-		    log("connect FAILED: ~w", [Err], CompSpec),
-		    not_available
-	    end
+                    %% Setup a genserver around the new connection.
+                    {ok, Pid } = dlink_tls_conn:setup(client, IP, Port, Sock,
+                                                      ?MODULE, handle_socket, CompSpec),
+                    try dlink_tls_conn:upgrade(Pid, client) of
+                        ok ->
+                            ?debug("Upgrade result = ~p", [ok]),
+                            %% Send authorize
+                            send_authorize(Pid, CompSpec),
+                            ok
+                    catch
+                        error:Error ->
+                            ?error("TLS upgrade (~p,~p) failed ~p",
+                                   [IP, Port, Error]),
+                            not_available
+                    end;
+                {error, Err } ->
+                    ?info("dlink_tls:connect_remote(): Failed ~p:~p: ~p",
+                           [IP, Port, Err]),
+                    log("connect FAILED: ~w", [Err], CompSpec),
+                    not_available
+            end
     end.
 
 connect_and_retry_remote( IP, Port, CompSpec) ->
     ?info("dlink_tls:connect_and_retry_remote(): ~p:~p",
-	  [ IP, Port]),
+          [ IP, Port]),
     CS = start_log(<<"conn">>, "connect ~s:~s", [IP, Port], CompSpec),
     case connect_remote(IP, list_to_integer(Port), CS) of
-	ok ->
-	    log("connected", [], CS),
-	    ok;
+        ok ->
+            log("connected", [], CS),
+            ok;
 
-	Err -> %% Failed to connect. Sleep and try again
-	    ?notice("dlink_tls:connect_and_retry_remote(~p:~p): Failed: ~p",
-			   [IP, Port, Err]),
+        Err -> %% Failed to connect. Sleep and try again
+            ?notice("dlink_tls:connect_and_retry_remote(~p:~p): Failed: ~p",
+                           [IP, Port, Err]),
 
-	    ?notice("dlink_tls:connect_and_retry_remote(~p:~p): Will try again in ~p sec",
-			   [IP, Port, ?DEFAULT_RECONNECT_INTERVAL]),
-	    log("start reconnect timer", [], CS),
-	    setup_reconnect_timer(?DEFAULT_RECONNECT_INTERVAL, IP, Port, CS),
+            ?notice("dlink_tls:connect_and_retry_remote(~p:~p): Will try again in ~p sec",
+                           [IP, Port, ?DEFAULT_RECONNECT_INTERVAL]),
+            log("start reconnect timer", [], CS),
+            setup_reconnect_timer(?DEFAULT_RECONNECT_INTERVAL, IP, Port, CS),
 
-	    not_available
+            not_available
     end.
 
 
@@ -281,38 +224,38 @@ announce_services_(_CompSpec, [], _Services, _Cost, _Availability) ->
     ok;
 
 announce_services_(CompSpec,
-			[{Conn, ConnPid} | T],
-			Services, Cost, Availability) ->
+                        [{Conn, ConnPid} | T],
+                        Services, Cost, Availability) ->
 
     ?debug("announce_services(~p, ~p, ~p)", [Conn, ConnPid, Services]),
     case authorize_rpc:filter_by_service(
-	   CompSpec, Services, Conn) of
-	[ok, [_]] ->
-	    ?debug("will announce", []),
-	    AvailabilityMsg = availability_msg(Availability, Services),
-	    Res = dlink_tls_conn:send(
-		    ConnPid,
-		    rvi_common:pass_log_id(
-		      [	{ ?DLINK_ARG_CMD, ?DLINK_CMD_SERVICE_ANNOUNCE },
-			{ ?DLINK_ARG_COST, Cost }
-			| AvailabilityMsg ], CompSpec)),
+           CompSpec, Services, Conn) of
+        [ok, [_]] ->
+            ?debug("will announce", []),
+            AvailabilityMsg = availability_msg(Availability, Services),
+            Res = dlink_tls_conn:send(
+                    ConnPid,
+                    rvi_common:pass_log_id(
+                      [ { ?DLINK_ARG_CMD, ?DLINK_CMD_SERVICE_ANNOUNCE },
+                        { ?DLINK_ARG_COST, Cost }
+                        | AvailabilityMsg ], CompSpec)),
 
-	    ?debug("announce_services(~p: ~p) -> ~p  Res: ~p",
-		   [ Availability, Services, ConnPid, Res]);
-	_Other ->
-	    ?debug("WON'T announce (~p)", [_Other]),
-	    ignore
+            ?debug("announce_services(~p: ~p) -> ~p  Res: ~p",
+                   [ Availability, Services, ConnPid, Res]);
+        _Other ->
+            ?debug("WON'T announce (~p)", [_Other]),
+            ignore
     end,
 
     %% Move on to next connection.
     announce_services_(CompSpec,
-		      T,
-		      Services, Cost, Availability).
+                      T,
+                      Services, Cost, Availability).
 
 announce_local_service_(CompSpec, Service, Availability) ->
     announce_services_(CompSpec,
-		       dlink_tls_connmgr:connections(),
-		       [Service], link_cost(CompSpec), Availability).
+                       dlink_tls_connmgr:connections(),
+                       [Service], link_cost(CompSpec), Availability).
 
 %% We lost the socket connection.
 %% Unregister all services that were routed to the remote end that just died.
@@ -332,31 +275,31 @@ handle_socket(FromPid, SetupIP, SetupPort, closed, CompSpec) ->
     %% Check if this was our last connection supporting each given service.
     lists:map(
       fun(SvcName) ->
-	      case get_connections_by_service(SvcName) of
-		  [] ->
-		      service_discovery_rpc:
-			  unregister_services(CompSpec,
-					      [SvcName],
-					      ?MODULE);
-		  _ -> ok
-	      end
+              case get_connections_by_service(SvcName) of
+                  [] ->
+                      service_discovery_rpc:
+                          unregister_services(CompSpec,
+                                              [SvcName],
+                                              ?MODULE);
+                  _ -> ok
+              end
       end, LostSvcNameList),
 
     {ok, PersistentConnections } = rvi_common:get_module_config(data_link,
-								?MODULE,
-								persistent_connections,
-								[],
-								CompSpec),
+                                                                ?MODULE,
+                                                                persistent_connections,
+                                                                [],
+                                                                CompSpec),
     %% Check if this is a static node. If so, setup a timer for a reconnect
     case lists:member(NetworkAddress, PersistentConnections) of
-	true ->
-	    ?info("dlink_tls:closed(): Reconnect address:  ~p", [ NetworkAddress ]),
-	    ?info("dlink_tls:closed(): Reconnect interval: ~p", [ ?DEFAULT_RECONNECT_INTERVAL ]),
-	    [ IP, Port] = string:tokens(NetworkAddress, ":"),
+        true ->
+            ?info("dlink_tls:closed(): Reconnect address:  ~p", [ NetworkAddress ]),
+            ?info("dlink_tls:closed(): Reconnect interval: ~p", [ ?DEFAULT_RECONNECT_INTERVAL ]),
+            [ IP, Port] = string:tokens(NetworkAddress, ":"),
 
-	    setup_reconnect_timer(?DEFAULT_RECONNECT_INTERVAL,
-				  IP, Port, CompSpec);
-	false -> ok
+            setup_reconnect_timer(?DEFAULT_RECONNECT_INTERVAL,
+                                  IP, Port, CompSpec);
+        false -> ok
     end,
     ok;
 
@@ -374,56 +317,56 @@ handle_socket(FromPid, PeerIP, PeerPort, data, Elems, CompSpec) ->
 
     case opt(?DLINK_ARG_CMD, Elems, undefined) of
         ?DLINK_CMD_AUTHORIZE ->
-	    ?debug("got authorize ~s:~w", [PeerIP, PeerPort]),
+            ?debug("got authorize ~s:~w", [PeerIP, PeerPort]),
             [ ProtoVersion,
-	      NodeId,
+              NodeId,
               Credentials ] =
                 opts([?DLINK_ARG_VERSION,
-		      ?DLINK_ARG_NODE_ID,
+                      ?DLINK_ARG_NODE_ID,
                       ?DLINK_ARG_CREDENTIALS],
                      Elems, undefined),
 
-	    try
-		process_authorize(FromPid, PeerIP, PeerPort, NodeId,
-				  Credentials, ProtoVersion, CS)
-	    catch
-		throw:{protocol_failure, What} ->
-		    ?error("Protocol failure (~p): ~p", [FromPid, What]),
-		    exit(FromPid, protocol_failure)
-	    end;
+            try
+                process_authorize(FromPid, PeerIP, PeerPort, NodeId,
+                                  Credentials, ProtoVersion, CS)
+            catch
+                throw:{protocol_failure, What} ->
+                    ?error("Protocol failure (~p): ~p", [FromPid, What]),
+                    exit(FromPid, protocol_failure)
+            end;
 
-	%% ?DLINK_CMD_CRED_EXCHANGE ->
-	%%     ?debug("got cred exch ~s:~w", [PeerIP, PeerPort]),
-	%%     [ Creds ] =
-	%% 	opts([?DLINK_ARG_CREDENTIALS], Elems, undefined),
-	%%     ?debug("Creds = ~p", [Creds]),
-	%%     log("creds from ~s:~w", [PeerIP, PeerPort], CS),
-	%%     authorize_rpc:store_creds(CS, Creds, {PeerIP, PeerPort}),
-	%%     case rvi_common:get_value(dlink_tls_role, client, CS) of
-	%% 	client -> ok;
-	%% 	server ->
-	%% 	    send_creds(FromPid, CompSpec)
-	%%     end,
-	%%     ok;
+        %% ?DLINK_CMD_CRED_EXCHANGE ->
+        %%     ?debug("got cred exch ~s:~w", [PeerIP, PeerPort]),
+        %%     [ Creds ] =
+        %%      opts([?DLINK_ARG_CREDENTIALS], Elems, undefined),
+        %%     ?debug("Creds = ~p", [Creds]),
+        %%     log("creds from ~s:~w", [PeerIP, PeerPort], CS),
+        %%     authorize_rpc:store_creds(CS, Creds, {PeerIP, PeerPort}),
+        %%     case rvi_common:get_value(dlink_tls_role, client, CS) of
+        %%      client -> ok;
+        %%      server ->
+        %%          send_creds(FromPid, CompSpec)
+        %%     end,
+        %%     ok;
 
         ?DLINK_CMD_SERVICE_ANNOUNCE ->
-	    ?debug("got service_announce ~s:~w", [PeerIP, PeerPort]),
-	    [ Status,
-	      Services,
-	      Cost0 ] =
+            ?debug("got service_announce ~s:~w", [PeerIP, PeerPort]),
+            [ Status,
+              Services,
+              Cost0 ] =
                 opts([?DLINK_ARG_STATUS,
                       ?DLINK_ARG_SERVICES,
-		      ?DLINK_ARG_COST],
+                      ?DLINK_ARG_COST],
                      Elems, undefined),
 
-	    Cost = case Cost0 of
-		       _ when is_integer(Cost0) ->
-			   Cost0;
-		       _ -> link_cost(CS)
-		   end,
-	    log("sa from ~s:~w", [PeerIP, PeerPort], CS),
-	    process_announce(Status, Services, Cost,
-			     FromPid, PeerIP, PeerPort, CompSpec);
+            Cost = case Cost0 of
+                       _ when is_integer(Cost0) ->
+                           Cost0;
+                       _ -> link_cost(CS)
+                   end,
+            log("sa from ~s:~w", [PeerIP, PeerPort], CS),
+            process_announce(Status, Services, Cost,
+                             FromPid, PeerIP, PeerPort, CompSpec);
 
         ?DLINK_CMD_RECEIVE ->
             [ _TransactionID,
@@ -445,119 +388,61 @@ handle_socket(FromPid, PeerIP, PeerPort, data, Elems, CompSpec) ->
             ok
     end.
 
-%% JSON-RPC entry point
-%% CAlled by local exo http server
-handle_notification(<<"service_available">>, Args) ->
-    {ok, SvcName} = rvi_common:get_json_element(["service"], Args),
-    {ok, DataLinkModule} = rvi_common:get_json_element(["data_link_module"], Args),
+call(Req) ->
+    gen_server:call(?MODULE, Req).
 
-    gen_server:cast(?SERVER, { rvi, service_available,
-				      [ SvcName,
-					DataLinkModule ]}),
+cast(Msg) ->
+    gen_server:cast(?MODULE, Msg).
 
-    ok;
-handle_notification(<<"service_unavailable">>, Args) ->
-    {ok, SvcName} = rvi_common:get_json_element(["service"], Args),
-    {ok, DataLinkModule} = rvi_common:get_json_element(["data_link_module"], Args),
-
-    gen_server:cast(?SERVER, { rvi, service_unavailable,
-				      [ SvcName,
-					DataLinkModule ]}),
-
-    ok;
-
-handle_notification(Other, _Args) ->
-    ?info("dlink_tls:handle_notification(~p): unknown", [ Other ]),
-    ok.
-
-handle_rpc(<<"setup_data_link">>, Args) ->
-    { ok, Service } = rvi_common:get_json_element(["service"], Args),
-
-    { ok, Opts } = rvi_common:get_json_element(["opts"], Args),
-
-    [ Res, Timeout ] = gen_server:call(?SERVER, { rvi, setup_data_link,
-						  [ Service, Opts ] }),
-
-    {ok, [ {status, rvi_common:json_rpc_status(Res)} , { timeout, Timeout }]};
-
-handle_rpc(<<"disconnect_data_link">>, Args) ->
-    { ok, NetworkAddress} = rvi_common:get_json_element(["network_address"], Args),
-    [Res] = gen_server:call(?SERVER, { rvi, disconnect_data_link, [NetworkAddress]}),
-    {ok, [ {status, rvi_common:json_rpc_status(Res)} ]};
-
-handle_rpc(<<"send_data">>, Args) ->
-    { ok, ProtoMod } = rvi_common:get_json_element(["proto_mod"], Args),
-    { ok, Service } = rvi_common:get_json_element(["service"], Args),
-    { ok,  Data } = rvi_common:get_json_element(["data"], Args),
-    { ok,  DataLinkOpts } = rvi_common:get_json_element(["opts"], Args),
-    [ Res ]  = gen_server:call(?SERVER, { rvi, send_data, [ProtoMod, Service, Data, DataLinkOpts]}),
-    {ok, [ {status, rvi_common:json_rpc_status(Res)} ]};
-
-handle_rpc(<<"connections">>, []) ->
-    Res = gen_server:call(?SERVER, connections),
-    {ok, [ {status, ok} | {connections, {array, Res}} ]};
-
-handle_rpc(Other, _Args) ->
-    ?info("dlink_tls:handle_rpc(~p): unknown", [ Other ]),
-    { ok, [ { status, rvi_common:json_rpc_status(invalid_command)} ] }.
-
-
-handle_cast( {rvi, service_available, [SvcName, local]}, St) ->
+handle_cast({service_available, [SvcName, local]},
+            #st{mod = Mod, mod_st = MSt} = St) ->
     ?debug("dlink_tls:service_available(): ~p (local)", [ SvcName ]),
-    announce_local_service_(St#st.cs, SvcName, available),
+    LogId = start_log("Svc available: ~s", [SvcName], Mod, MSt),
+    dlink_conn:announce_local_service(SvcName, available, Mod, LogId),
     {noreply, St};
-
-
-handle_cast( {rvi, service_available, [SvcName, Mod]}, St) ->
+handle_cast({service_available, SvcName, Mod}, St) ->
     ?debug("dlink_tls:service_available(): ~p (~p) ignored", [ SvcName, Mod ]),
     %% We don't care about remote services available through
     %% other data link modules
     {noreply, St};
-
-
-handle_cast( {rvi, service_unavailable, [SvcName, local]}, St) ->
-    announce_local_service_(St#st.cs, SvcName, unavailable),
+handle_cast({service_unavailable, SvcName, local}, St) ->
+    LogId = start_log("Svc unavailable: ~s", [SvcName], Mod, MSt),
+    dlink_conn:announce_local_service(SvcName, unavailable, Mod, LogId),
     {noreply, St};
-
-handle_cast( {rvi, service_unavailable, [_SvcName, _]}, St) ->
+handle_cast({service_unavailable, _SvcName, _}, St) ->
     %% We don't care about remote services available through
     %% other data link modules
     {noreply, St};
-
-
 handle_cast(Other, St) ->
-    ?warning("dlink_tls:handle_cast(~p): unknown", [ Other ]),
+    ?debug("handle_cast(~p): unknown", [ Other ]),
     {noreply, St}.
 
-
-handle_call({rvi, setup_data_link, [ Service, Opts ]}, _From, St) ->
+handle_call({setup_data_link, Service, Opts}, _From, St) ->
     %% Do we already have a connection that support service?
-    ?info("dlink_tls: setup_data_link (~p, ~p)~n", [Service, Opts]),
+    ?debug("setup_data_link(~p, ~p)~n", [Service, Opts]),
     case get_connections_by_service(Service) of
-	[] -> %% Nop[e
-	    case proplists:get_value(target, Opts, undefined) of
-		undefined ->
-		    ?info("dlink_tls:setup_data_link(~p) Failed: no target given in options.",
-			  [Service]),
-		    { reply, [ok, -1 ], St };
+        [] -> %% Nope
+            case proplists:get_value(target, Opts, undefined) of
+                undefined ->
+                    ?debug("setup_data_link(~p) Failed: "
+                           "no target given in options", [Service]),
+                    {reply, {ok, -1}, St};
+                Addr ->
+                    [Address, Port] = string:tokens(Addr, ":"),
+                    case connect_remote(Address, list_to_integer(Port), St#st.cs) of
+                        ok  ->
+                            { reply, [ok, 2000], St };  %% 2 second timeout
 
-		Addr ->
-		    [ Address, Port] =  string:tokens(Addr, ":"),
+                        already_connected ->  %% We are already connected
+                            { reply, [already_connected, -1], St };
 
-		    case connect_remote(Address, list_to_integer(Port), St#st.cs) of
-			ok  ->
-			    { reply, [ok, 2000], St };  %% 2 second timeout
+                        Err ->
+                            { reply, [Err, 0], St }
+                    end
+            end;
 
-			already_connected ->  %% We are already connected
-			    { reply, [already_connected, -1], St };
-
-			Err ->
-			    { reply, [Err, 0], St }
-		    end
-	    end;
-
-	_ ->  %% Yes - We do have a connection that knows of service
-	    { reply, [already_connected, -1], St }
+        _ ->  %% Yes - We do have a connection that knows of service
+            { reply, [already_connected, -1], St }
     end;
 
 
@@ -568,42 +453,41 @@ handle_call({rvi, disconnect_data_link, [NetworkAddress] }, _From, St) ->
 
 
 handle_call({rvi, send_data, [ProtoMod, Service, Data, DataLinkOpts] = Args},
-	    _From, #st{tid = Tid} = St) ->
+            _From, #st{tid = Tid} = St) ->
     ?debug("send_data: Args = ~p", [Args]),
     %% Resolve connection pid from service
     case get_connections_by_service(Service) of
-	[] ->
-	    {reply, [no_route], St};
+        [] ->
+            {reply, [no_route], St};
 
-	%% FIXME: What to do if we have multiple connections to the same service?
-	[_|_] = Conns ->
-	    ConnPid = cheapest_conn(Conns),
- 	    Res = dlink_tls_conn:send(
-		    ConnPid, [{?DLINK_ARG_TRANSACTION_ID, Tid},
-			      {?DLINK_ARG_CMD, ?DLINK_CMD_RECEIVE},
-			      {?DLINK_ARG_MODULE, atom_to_binary(ProtoMod, latin1)},
-			      {?DLINK_ARG_DATA, Data}],
-		    DataLinkOpts),
-	    {reply, [Res], St#st{tid = Tid + 1}}
+        %% FIXME: What to do if we have multiple connections to the same service?
+        [_|_] = Conns ->
+            ConnPid = cheapest_conn(Conns),
+            Res = dlink_tls_conn:send(
+                    ConnPid, [{?DLINK_ARG_TRANSACTION_ID, Tid},
+                              {?DLINK_ARG_CMD, ?DLINK_CMD_RECEIVE},
+                              {?DLINK_ARG_MODULE, atom_to_binary(ProtoMod, latin1)},
+                              {?DLINK_ARG_DATA, Data}],
+                    DataLinkOpts),
+            {reply, [Res], St#st{tid = Tid + 1}}
     end;
 
 handle_call({setup_initial_ping, Address, Port, Pid}, _From, St) ->
     %% Create a timer to handle periodic pings.
     {ok, ServerOpts } = rvi_common:get_module_config(data_link,
-						     ?MODULE,
-						     ?SERVER_OPTS, [],
-						     St#st.cs),
+                                                     ?MODULE,
+                                                     ?SERVER_OPTS, []),
     Timeout = proplists:get_value(ping_interval, ServerOpts, ?DEFAULT_PING_INTERVAL),
 
     ?info("dlink_tls:setup_ping(): ~p:~p will be pinged every ~p msec",
-	  [ Address, Port, Timeout] ),
+          [ Address, Port, Timeout] ),
 
     erlang:send_after(Timeout, self(), { rvi_ping, Pid, Address, Port, Timeout }),
 
     {reply, ok, St};
 
 handle_call(Other, _From, St) ->
-    ?warning("dlink_tls:handle_rpc(~p): unknown", [ Other ]),
+    ?warning("handle_call(~p): unknown", [ Other ]),
     { reply, { ok, [ { status, rvi_common:json_rpc_status(invalid_command)} ]}, St}.
 
 
@@ -613,14 +497,14 @@ handle_info({ rvi_ping, Pid, Address, Port, Timeout},  St) ->
 
     %% Check that connection is up
     case dlink_tls_conn:is_connection_up(Pid) of
-	true ->
-	    ?info("dlink_tls:ping(): Pinging: ~p:~p", [Address, Port]),
- 	    dlink_tls_conn:send(Pid, [{ ?DLINK_ARG_CMD, ?DLINK_CMD_PING }]),
-	    erlang:send_after(Timeout, self(),
-			      { rvi_ping, Pid, Address, Port, Timeout });
+        true ->
+            ?info("dlink_tls:ping(): Pinging: ~p:~p", [Address, Port]),
+            dlink_tls_conn:send(Pid, [{ ?DLINK_ARG_CMD, ?DLINK_CMD_PING }]),
+            erlang:send_after(Timeout, self(),
+                              { rvi_ping, Pid, Address, Port, Timeout });
 
-	false ->
-	    ok
+        false ->
+            ok
     end,
     {noreply, St};
 
@@ -642,15 +526,15 @@ code_change(_OldVsn, St, _Extra) ->
 
 setup_reconnect_timer(MSec, IP, Port, CompSpec) ->
     erlang:send_after(MSec, ?MODULE,
-		      { rvi_setup_persistent_connection,
-			IP, Port, CompSpec }),
+                      { rvi_setup_persistent_connection,
+                        IP, Port, CompSpec }),
     ok.
 
 get_services_by_connection(ConnPid) ->
     case ets:lookup(?CONNECTION_TABLE, ConnPid) of
-	[ #connection_entry { services = SvcNames } ] ->
-	    SvcNames;
-	[] -> []
+        [ #connection_entry { services = SvcNames } ] ->
+            SvcNames;
+        [] -> []
     end.
 
 
@@ -662,14 +546,14 @@ get_connections_by_service(Service) ->
 
 get_connections_by_service_(Service) ->
     ?debug("get_connections_by_service(~p,~n~p)",
-	   [Service, ets:tab2list(?SERVICE_TABLE)]),
+           [Service, ets:tab2list(?SERVICE_TABLE)]),
     case ets:lookup(?SERVICE_TABLE, Service) of
-	[ #service_entry { connections = Connections } ] ->
-	    ?debug("~p found; ~p", [Service, Connections]),
-	    Connections;
-	[] ->
-	    ?debug("~p not found", [Service]),
-	    []
+        [ #service_entry { connections = Connections } ] ->
+            ?debug("~p found; ~p", [Service, Connections]),
+            Connections;
+        [] ->
+            ?debug("~p not found", [Service]),
+            []
     end.
 
 cheapest_conn([{Pid, Cost}|Conns]) ->
@@ -677,9 +561,9 @@ cheapest_conn([{Pid, Cost}|Conns]) ->
 
 cheapest_conn([{P, C}|T], Cost, Pid) ->
     if C < Cost ->
-	    cheapest_conn(T, C, P);
+            cheapest_conn(T, C, P);
        true ->
-	    cheapest_conn(T, Cost, Pid)
+            cheapest_conn(T, Cost, Pid)
     end;
 cheapest_conn([], Cost, Pid) ->
     ?debug("cheapest connection: ~p (Cost = ~p)", [Pid, Cost]),
@@ -690,19 +574,19 @@ add_services(SvcNameList, Cost, ConnPid) ->
     %% with the sum of new and old services.
     ?debug("add_services(~p, ~p)", [SvcNameList, ConnPid]),
     ets:insert(?CONNECTION_TABLE,
-	       #connection_entry {
-		  connection = ConnPid,
-		  services = union(SvcNameList,
-				   get_services_by_connection(ConnPid))
-	      }),
+               #connection_entry {
+                  connection = ConnPid,
+                  services = union(SvcNameList,
+                                   get_services_by_connection(ConnPid))
+              }),
 
     %% Add the connection to the service entry for each servic.
     [ ets:insert(?SERVICE_TABLE,
-	       #service_entry {
-		  service = SvcName,
-		  connections = [{ConnPid, Cost}
-				 | get_connections_by_service(SvcName)]
-		 }) || SvcName <- SvcNameList ],
+               #service_entry {
+                  service = SvcName,
+                  connections = [{ConnPid, Cost}
+                                 | get_connections_by_service(SvcName)]
+                 }) || SvcName <- SvcNameList ],
     ok.
 
 union(A, B) ->
@@ -711,21 +595,21 @@ union(A, B) ->
 
 delete_services(ConnPid, SvcNameList) ->
     ets:insert(?CONNECTION_TABLE,
-	       #connection_entry {
-		  connection = ConnPid,
-		  services = get_services_by_connection(ConnPid) -- SvcNameList
-		 }),
+               #connection_entry {
+                  connection = ConnPid,
+                  services = get_services_by_connection(ConnPid) -- SvcNameList
+                 }),
 
     %% Loop through all services and update the conn table
     %% Update them with a new version where ConnPid has been removed
     [ ets:insert(
-	?SERVICE_TABLE,
-	#service_entry {
-	   service = SvcName,
-	   connections = [S || {_,P} = S
-				   <- get_connections_by_service(SvcName),
-			       P =/= ConnPid]
-	  }) || SvcName <- SvcNameList ],
+        ?SERVICE_TABLE,
+        #service_entry {
+           service = SvcName,
+           connections = [S || {P, _} = S
+                                   <- get_connections_by_service(SvcName),
+                               P =/= ConnPid]
+          }) || SvcName <- SvcNameList ],
     ok.
 
 availability_msg(Availability, Services) ->
@@ -735,18 +619,18 @@ availability_msg(Availability, Services) ->
 status_string(available  ) -> ?DLINK_ARG_AVAILABLE;
 status_string(unavailable) -> ?DLINK_ARG_UNAVAILABLE;
 status_string(S) when S == ?DLINK_ARG_AVAILABLE;
-		      S == ?DLINK_ARG_UNAVAILABLE ->
+                      S == ?DLINK_ARG_UNAVAILABLE ->
     S.
 
 
 process_authorize(FromPid, PeerIP, PeerPort, NodeId,
-		  Credentials, ProtoVersion, CompSpec) ->
+                  Credentials, ProtoVersion, CompSpec) ->
     ?info("dlink_tls:authorize(): Peer Address:   ~s:~p", [PeerIP, PeerPort ]),
     case ProtoVersion of
-	<<"1.", _/binary>> -> ok;
-	undefined -> ok;
-	_ ->
-	    throw({protocol_failure, {unknown_version, ProtoVersion}})
+        <<"1.", _/binary>> -> ok;
+        undefined -> ok;
+        _ ->
+            throw({protocol_failure, {unknown_version, ProtoVersion}})
     end,
     Conn = {PeerIP, PeerPort},
     log("auth ~s:~w", [PeerIP, PeerPort], CompSpec),
@@ -758,13 +642,13 @@ send_authorize(Pid, CompSpec) ->
     ?debug("send_authorize() Pid = ~p; CompSpec = ~p", [Pid, abbrev(CompSpec)]),
     Creds = get_credentials(CompSpec),
     dlink_tls_conn:send(Pid, rvi_common:pass_log_id(
-			       [{?DLINK_ARG_CMD, ?DLINK_CMD_AUTHORIZE},
-				{?DLINK_ARG_VERSION, ?DLINK_TLS_VERSION},
-				{?DLINK_ARG_NODE_ID, rvi_common:node_id()},
-				{?DLINK_ARG_CREDENTIALS, Creds}], CompSpec)).
+                               [{?DLINK_ARG_CMD, ?DLINK_CMD_AUTHORIZE},
+                                {?DLINK_ARG_VERSION, ?DLINK_TLS_VERSION},
+                                {?DLINK_ARG_NODE_ID, rvi_common:node_id()},
+                                {?DLINK_ARG_CREDENTIALS, Creds}], CompSpec)).
 
 connection_authorized(FromPid, {RemoteIP, RemotePort} = Conn,
-		      NodeId, CompSpec) ->
+                      NodeId, CompSpec) ->
     %% If FromPid (the genserver managing the socket) is not yet registered
     %% with the connection manager, this is an incoming connection
     %% from the client. We should respond with our own authorize followed by
@@ -773,14 +657,14 @@ connection_authorized(FromPid, {RemoteIP, RemotePort} = Conn,
     dlink_tls_conn:publish_node_id(FromPid, NodeId, CompSpec),
     add_services([<<"rvi:", NodeId/binary>>], 0, FromPid),
     case dlink_tls_connmgr:find_connection_by_pid(FromPid) of
-	not_found ->
-	    ?info("dlink_tls:authorize(): New connection!"),
-	    dlink_tls_connmgr:add_connection(RemoteIP, RemotePort, FromPid),
-	    ?debug("dlink_tls:authorize(): Sending authorize."),
+        not_found ->
+            ?info("dlink_tls:authorize(): New connection!"),
+            dlink_tls_connmgr:add_connection(RemoteIP, RemotePort, FromPid),
+            ?debug("dlink_tls:authorize(): Sending authorize."),
             _Res = send_authorize(FromPid, CompSpec),
-	    ok;
-	_ ->
-	    ok
+            ok;
+        _ ->
+            ok
     end,
 
     %% Send our own servide announcement to the remote server
@@ -792,14 +676,14 @@ connection_authorized(FromPid, {RemoteIP, RemotePort} = Conn,
 
     %% Send an authorize back to the remote node
     ?info("dlink_tls:authorize(): Announcing local services: ~p to remote ~p:~p",
-	  [FilteredServices, RemoteIP, RemotePort]),
+          [FilteredServices, RemoteIP, RemotePort]),
 
     AvailabilityMsg = availability_msg(available, FilteredServices),
     log("sending sa: ~s:~w", [RemoteIP, RemotePort], CompSpec),
     dlink_tls_conn:send(FromPid,
-			rvi_common:pass_log_id(
-			  [ { ?DLINK_ARG_CMD, ?DLINK_CMD_SERVICE_ANNOUNCE }
-			    | AvailabilityMsg ], CompSpec)),
+                        rvi_common:pass_log_id(
+                          [ { ?DLINK_ARG_CMD, ?DLINK_CMD_SERVICE_ANNOUNCE }
+                            | AvailabilityMsg ], CompSpec)),
 
     %% Setup ping interval
     gen_server:call(?SERVER, { setup_initial_ping, RemoteIP, RemotePort, FromPid }),
@@ -812,24 +696,24 @@ process_data(_FromPid, RemoteIP, RemotePort, ProtocolMod, Data, CompSpec) ->
     Proto:receive_message(CompSpec, {RemoteIP, RemotePort}, Data).
 
 process_announce(Avail, Svcs, Cost, FromPid, IP, Port, CompSpec) ->
-    ?debug("dlink_tls:service_announce(~p): Address:       ~p:~p", [Avail,IP,Port]),
-    ?debug("dlink_tls:service_announce(~p): Services:      ~p", [Avail,Svcs]),
-    ?debug("dlink_tls:service_announce(~p): Cost:          ~p", [Cost]),
+    ?debug("service_announce(~p): Address:       ~p:~p", [Avail,IP,Port]),
+    ?debug("service_announce(~p): Services:      ~p", [Avail, Svcs]),
+    ?debug("service_announce(~p): Cost:          ~p", [Cost]),
     Connections = dlink_tls_connmgr:connections() -- [FromPid],
     case Avail of
-	?DLINK_ARG_AVAILABLE ->
-	    add_services(Svcs, Cost, FromPid),
-	    service_discovery_rpc:register_services(CompSpec, Svcs, ?MODULE);
-	?DLINK_ARG_UNAVAILABLE ->
-	    delete_services(FromPid, Svcs),
-	    service_discovery_rpc:unregister_services(CompSpec, Svcs, ?MODULE)
+        ?DLINK_ARG_AVAILABLE ->
+            add_services(Svcs, Cost, FromPid),
+            service_discovery_rpc:register_services(CompSpec, Svcs, ?MODULE);
+        ?DLINK_ARG_UNAVAILABLE ->
+            delete_services(FromPid, Svcs),
+            service_discovery_rpc:unregister_services(CompSpec, Svcs, ?MODULE)
     end,
     MaxCost = max_cost(CompSpec),
     case Cost + routing_cost(CompSpec) + link_cost(CompSpec) of
-	NewCost when NewCost > MaxCost ->
-	    ignore;
-	NewCost ->
-	    announce_services_(CompSpec, Connections, Svcs, NewCost, Avail)
+        NewCost when NewCost > MaxCost ->
+            ignore;
+        NewCost ->
+            announce_services_(CompSpec, Connections, Svcs, NewCost, Avail)
     end,
     ok.
 
@@ -842,14 +726,14 @@ delete_connection(Conn) ->
     %% SvcName with a new one where the SvcName is removed.
     lists:map(
       fun(SvcName) ->
-	      Existing = get_connections_by_service(SvcName),
-	      ets:insert(?SERVICE_TABLE, #
-			     service_entry {
-			       service = SvcName,
-			       connections = lists:keydelete(
-					       Conn, 2, Existing)
-			      })
-	      end, SvcNameList),
+              Existing = get_connections_by_service(SvcName),
+              ets:insert(?SERVICE_TABLE, #
+                             service_entry {
+                               service = SvcName,
+                               connections = lists:keydelete(
+                                               Conn, 2, Existing)
+                              })
+              end, SvcNameList),
 
     %% Delete the connection
     ets:delete(?CONNECTION_TABLE, Conn),
@@ -875,17 +759,17 @@ max_cost(_CS) -> 10.
 
 get_credentials(CompSpec) ->
     case authorize_rpc:get_credentials(CompSpec) of
-	[ok, Creds] ->
-	    Creds;
-	[not_found] ->
-	    ?error("No credentials found~n", []),
-	    error(no_credentials_found)
+        [ok, Creds] ->
+            Creds;
+        [not_found] ->
+            ?error("No credentials found~n", []),
+            error(no_credentials_found)
     end.
 
 opt(K, L, Def) ->
     case lists:keyfind(K, 1, L) of
-	{_, V} -> V;
-	false  -> Def
+        {_, V} -> V;
+        false  -> Def
     end.
 
 opts(Keys, Elems, Def) ->

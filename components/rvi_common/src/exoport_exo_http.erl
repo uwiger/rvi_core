@@ -55,8 +55,13 @@ handle_post(Socket, Request, Body, AppMod) ->
 handle_post_json(Socket, _Request, Body, Attachments, AppMod) ->
     try decode_json(Body) of
 	{call, Id, Method, Args0} ->
-	    Args = Args0 ++ Attachments,
-	    try handle_rpc(AppMod, Method, Args) of
+	    Args = case Attachments of
+		       [] ->
+			   Args0;
+		       [_|_] ->
+			   Args0#{<<"files">> => Attachments}
+		   end,
+	    try handle_rpc(AppMod, Method, Id, Args) of
 		{ok, Reply} ->
 		    success_response(Socket, Id, Reply);
 		ok ->
@@ -82,6 +87,7 @@ handle_post_json(Socket, _Request, Body, Attachments, AppMod) ->
 				     "Internal Error",
 				     "Internal Error")
     end.
+
 handle_post_multipart(Socket, Request, Body, AppMod) ->
     try inspect_multipart_post_(Request, Body) of
 	{ok, [BodyPart], Files} ->
@@ -127,14 +133,12 @@ inspect_multipart_post_(Request, Body) ->
 pack_attachments([]) ->
     [];
 pack_attachments([_|_] = L) ->
-    [{<<"rvi.files">>,
-      [[
-	{<<"cid">>, to_bin(ID)},
-	{<<"hdrs">>, [hdr_obj(<<"Content-Type">>, Type)
-		      | [hdr_obj(K, V) || {K, V} <- Hs]]},
-	{<<"data">>, to_bin(Body)}
-       ]
-       || {ID, Type, Hs, Body} <- L]}].
+    [#{<<"cid">>  => to_bin(ID),
+       <<"hdrs">> => maps:from_list(
+		       [hdr_obj(<<"Content-Type">>, Type)
+			| [hdr_obj(K, V) || {K, V} <- Hs]]),
+       <<"data">> => to_bin(Body)}
+     || {ID, Type, Hs, Body} <- L].
 
 to_bin(Str) ->
     iolist_to_binary(Str).
@@ -222,21 +226,22 @@ match_hdr(_, []) ->
     false.
 
 %% Validated RPC
-handle_rpc(Mod, Method, Args) ->
-    ?debug("exoport_exo_http_server:handle_rpc(): Mod:       ~p", [Mod]),
-    ?debug("exoport_exo_http_server:handle_rpc(): Method:    ~p", [Method]),
-    ?debug("exoport_exo_http_server:handle_rpc(): Args:      ~p", [Args]),
+handle_rpc(Mod, Method, Id, Args) ->
+    ?debug("handle_rpc(): Mod:       ~p", [Mod]),
+    ?debug("handle_rpc(): Method:    ~p", [Method]),
+    ?debug("handle_rpc(): Id:        ~p", [Id]),
+    ?debug("handle_rpc(): Args:      ~p", [Args]),
 
-    try Mod:handle_rpc(Method, Args) of
+    try call_handle_rpc(Mod, Method, Id, Args) of
 	{ok, Result} ->
-	    ?debug("exoport_exo_http_server:handle_rpc(ok): Result:   ~p", [Result]),
+	    ?debug("handle_rpc(ok): Result:   ~p", [Result]),
 	    {ok, Result};
 
 	{error, Reason} ->
 	    {error, Reason};
 
 	Wut ->
-	    ?warning("exoport_exo_http_server:handle_rpc(ok): UNKNOWN:   ~p", [Wut]),
+	    ?warning("handle_rpc(ok): UNKNOWN:   ~p", [Wut]),
 	    {error, Wut}
 
     catch
@@ -246,10 +251,18 @@ handle_rpc(Mod, Method, Args) ->
 	    {error, {internal_error, Crash}}
     end.
 
+call_handle_rpc(Mod, Method, Id, Args) ->
+    case erlang:function_exported(Mod, handle_rpc, 3) of
+	true ->
+	    Mod:handle_rpc(Method, Args);
+	false ->
+	    Mod:handle_rpc(Method, Id, Args)
+    end.
+
 handle_notification(Mod, Method, Args) ->
-    ?debug("exoport_exo_http_server:handle_notification(): Mod:       ~p", [Mod]),
-    ?debug("exoport_exo_http_server:handle_notification(): Method:    ~p", [Method]),
-    ?debug("exoport_exo_http_server:handle_notification(): Args:      ~p", [Args]),
+    ?debug("handle_notification(): Mod:       ~p", [Mod]),
+    ?debug("handle_notification(): Method:    ~p", [Method]),
+    ?debug("handle_notification(): Args:      ~p", [Args]),
 
     try Mod:handle_notification(Method, Args) of
 	_ -> ok
@@ -260,84 +273,60 @@ handle_notification(Mod, Method, Args) ->
 	    {error, {internal_error, Crash}}
     end.
 
+success_response(Socket, Id, #{<<"jsonrpc">> := <<"2.0">>,
+			       <<"id">> := Id} = JSON) ->
+    exo_http_server:response(Socket, undefined, 200, "OK",
+			     jsx:encode(JSON),
+			     [{content_type, "application/json"}]);
 success_response(Socket, Id, Reply) ->
-    JSON = [{<<"jsonrpc">>, <<"2.0">>},
-	    {<<"id">>, Id},
-	    {<<"result">>, Reply}],
+    JSON = #{<<"jsonrpc">> => <<"2.0">>,
+	     <<"id">>      => Id,
+	     <<"result">>  => Reply},
     exo_http_server:response(Socket, undefined, 200, "OK",
 			     jsx:encode(JSON),
 			     [{content_type, "application/json"}]).
 
 error_response(Socket, Error) ->
     %% No Id available
-    {Code, Msg} = pick_error(Error),
-    JSON = [{<<"jsonrpc">>, <<"2.0">>},
-	    {<<"error">>, [{<<"code">>, Code},
-			   {<<"message">>, Msg}]}],
+    {Code, Msg} = rvi_common:json_rpc_error_t(Error),
+    JSON = #{<<"jsonrpc">> => <<"2.0">>,
+	     <<"error">>   => #{<<"code">>    => Code,
+				<<"message">> => Msg}},
     Body = jsx:encode(JSON),
     exo_http_server:response(Socket, undefined, 200, "OK", Body,
 			     [{content_type, "application/json"}]).
 
-pick_error(Error) when is_atom(Error) ->
-    Code = json_error_code(Error),
-    {Code, json_error_msg(Code)};
-pick_error(Error) when is_integer(Error) ->
-    {Error, json_error_msg(Error)}.
-
 error_response(Socket, Id, Error) ->
-    JSON = [{<<"jsonrpc">>, <<"2.0">>},
-	    {<<"id">>, Id},
-	    {<<"error">>, [{<<"code">>, json_error_code(Error)},
-			   {<<"message">>, json_error_msg(Error)}]}],
+    {Code, Msg} = rvi_common:json_rpc_status_t(Error),
+    JSON = #{<<"jsonrpc">> => <<"2.0">>,
+	     <<"id">>      => Id,
+	     <<"error">>   => #{<<"code">>    => Code,
+				<<"message">> => Msg}},
     Body = jsx:encode(JSON),
     exo_http_server:response(Socket, undefined, 200, "OK", Body,
 			     [{content_type, "application/json"}]).
 
 decode_json(Body) ->
-    try jsx:decode(Body) of
-	[T|_] = Elems when is_tuple(T) ->
-	    case [opt(K,Elems,undefined) ||
-		     K <- [<<"jsonrpc">>, <<"id">>,
-			   <<"method">>, <<"params">>]] of
-		[<<"2.0">>,undefined,Method,Params]
-		  when Method =/= undefined,
-		       Params =/= undefined ->
-		    {notification, Method, Params};
-		[<<"2.0">>,Id,Method,Params]
-		  when Id=/=undefined,
-		       Method=/=undefined,
-		       Params =/= undefined ->
-		    {call, Id, Method, Params};
-		_ ->
-		    {error, invalid}
-	    end
+    try jsx:decode(Body, [return_maps]) of
+	#{<<"jsonrpc">> := <<"2.0">>,
+	  <<"method">>	:= Method,
+	  <<"params">>	:= #{} = Params,
+	  <<"id">>	:= Id}           -> {call, Id, Method, Params};
+	#{<<"jsonrpc">> := <<"2.0">>,
+	  <<"method">>  := Method,
+	  <<"params">>  := #{} = Params} -> {notification, Method, Params};
+	_ ->
+	    {error, invalid}
     catch
 	error:_ ->
 	    {error, parse_error}
     end.
-
-json_error_code(parse_error     )  -> -32700;
-json_error_code(invalid_request )  -> -32600;
-json_error_code(method_not_found)  -> -32601;
-json_error_code(invalid_params  )  -> -32602;
-json_error_code(internal_error  )  -> -32603;
-json_error_code(_) -> -32603. % internal error
-
-
-json_error_msg(-32700) -> <<"parse error">>;
-json_error_msg(-32600) -> <<"invalid request">>;
-json_error_msg(-32601) -> <<"method not found">>;
-json_error_msg(-32602) -> <<"invalid params">>;
-json_error_msg(-32603) -> <<"internal error">>;
-json_error_msg(Code) when Code >= -32099, Code =< -32000 -> <<"server error">>;
-json_error_msg(_) -> <<"json error">>.
 
 opt(K, L, Def) ->
     case lists:keyfind(K, 1, L) of
 	{_, V} -> V;
 	false  -> Def
     end.
-
 
 ensure_ready(F, Socket, Request, Body, AppMod) ->
     try rvi_server:ensure_ready(_Timeout = 10000),

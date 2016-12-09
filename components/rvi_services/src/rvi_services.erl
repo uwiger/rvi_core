@@ -61,7 +61,7 @@ configured_services() ->
 register_service({SvcName, Module, URL}, CompSpec) ->
     Port = url_port(URL),
     {ok,_} = rvi_services_svc_sup:start_service(Port, Module),
-    service_edge_rpc:register_service(CompSpec, SvcName, URL).
+    service_edge_rpc:register_service(SvcName, URL).
 
 url_port("http" ++ _ = URI) ->
     #url{port = Port} = exo_url:parse(URI),

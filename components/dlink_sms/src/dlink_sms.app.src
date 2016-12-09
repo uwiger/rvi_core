@@ -21,7 +21,7 @@
 		  dlink
                  ]},
   {mod, { dlink_sms_app, []}},
-  {start_phases, [{json_rpc, []}, {connection_manager, []}, {announce, []}]},
+  {start_phases, [{announce, []}]},
   {env, [
 	 {rvi_core_await, [{n,l,dlink_sms}]}
 	]}

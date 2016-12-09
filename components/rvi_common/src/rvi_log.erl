@@ -54,17 +54,29 @@ start_link() ->
     create_tabs(),
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
-entry(TID, Component, Event) -> log(TID, ?INFO, Component, Event).
-exit_good(TID, Component, Event) -> log(TID, ?GOOD, Component, Event).
-exit_warn(TID, Component, Event) -> log(TID, ?WARN, Component, Event).
-exit_fail(TID, Component, Event) -> log(TID, ?FAIL, Component, Event).
+entry(#{} = M, Component, Event) -> log(M, ?INFO, Component, Event).
+exit_good(#{} = M, Component, Event) -> log(M, ?GOOD, Component, Event).
+exit_warn(#{} = M, Component, Event) -> log(M, ?WARN, Component, Event).
+exit_fail(#{} = M, Component, Event) -> log(M, ?FAIL, Component, Event).
 
-log(TID, Component, Event) when is_binary(TID), is_binary(Component) ->
-    log(TID, ?INFO, Component, Event).
+log(#{} = M, Component, Event) when is_binary(Component) ->
+    log(M, ?INFO, Component, Event).
 
-log(TID, Level, Component, Event) when is_binary(TID), is_binary(Component) ->
-    gen_server:cast(?MODULE, {log, TID, level_num(Level), timestamp(), Component, bin(Event)}).
+log(#{<<"log_id">> := TID} = M, Level, Component, Event)
+  when is_binary(Component) ->
+    gen_server:cast(?MODULE, {log, TID, level_num(Level),
+			      timestamp(), Component, bin(Event)}),
+    maybe_reply(M, Level, Event).
 
+%% If event signifies failure, send reply to client proxy.
+maybe_reply(#{<<"reply_id">> := To} = R, 3, Event) ->
+    rvi_common:send_reply(
+      To, R#{<<"status">> => {error, error_code(Event)}});
+maybe_reply(_, _, _) ->
+    ok.
+
+error_code({C,_}) -> C;
+error_code(_)     -> internal_error.
 
 level_num(L) when is_integer(L), L >= ?INFO, L =< ?FAIL ->
     L;
@@ -92,12 +104,11 @@ trunc_msg(Bin) ->
     binary:part(Bin, 0, ?MAX_LENGTH).
 
 
-flog(Fmt, Args, Component, CS) ->
-    flog(0, Fmt, Args, Component, CS).
+flog(Fmt, Args, Component, R) ->
+    flog(0, Fmt, Args, Component, R).
 
-flog(Level, Fmt, Args, Component, CS) ->
-    LogTID = rvi_common:get_log_id(CS),
-    log(LogTID, Level, Component, format(Fmt, Args)).
+flog(Level, Fmt, Args, Component, #{} = R) ->
+    log(R, Level, Component, format(Fmt, Args)).
 
 timestamp() ->
     os:timestamp().
@@ -423,6 +434,7 @@ format_events([]) ->
 bin(A) when is_atom(A)   -> atom_to_binary(A, latin1);
 bin(B) when is_binary(B) -> B;
 bin(L) when is_list(L)   -> iolist_to_binary(L);
+bin({C, E}) when is_atom(C) -> bin(E);
 bin(Other) ->
     iolist_to_binary(io_lib:fwrite("~w", [Other])).
 

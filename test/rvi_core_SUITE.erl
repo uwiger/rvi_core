@@ -367,22 +367,31 @@ t_register_sota_service_(Port, Mode) ->
     timer:sleep(500).
 
 t_call_sota_service(_Config) ->
-    call_sota_service_(sota_client, sota_bin()).
+    Params = [{<<"service_name">>, <<"jlr.com/vin/abc/sota">>},
+	      {<<"timeout">>, rvi_timeout(seconds, 10)},
+	      {<<"max_msg_size">>, 100},
+	      {<<"parameters">>,
+	       [{<<"data">>, sota_bin()}]}],
+    call_sota_service_(<<"/sota">>, sota_client, Params).
 
 t_call_sota_service_inline(_Config) ->
+    Params =
+	[{<<"service_name">>, <<"jlr.com/vin/abc/sota/inline">>},
+	 {<<"parameters">>,
+	  [
+	   {<<"data">>, [{<<"mydata">>, <<"file:testfile.txt">>}]}
+	  ]}
+	],
     call_sota_service_(
-      <<"/sota/inline">>,
-      sota_client_inline,
-      [{<<"mydata">>, <<"file:testfile.txt">>}],
-      [testfile()]).
+      <<"/sota/inline">>, sota_client_inline, Params, [testfile()]).
 
 t_call_sota_service_synch(_Config) ->
-    call_sota_service_(
-      <<"/sota">>,
-      sota_client_synch,
-      <<"the data">>,
-      [{<<"rvi.synch">>, true}],
-      []).
+    Params =
+	[{<<"service_name">>, <<"jlr.com/vin/abc/sota">>},
+	 {<<"synch">>, true},
+	 {<<"timeout">>, rvi_timeout(seconds, 10)},
+	 {<<"parameters">>, [{<<"data">>, <<"the data">>}]}],
+    call_sota_service_(<<"/sota">>, sota_client_synch, Params).
 
 t_multicall_sota_service(Config) ->
     with_trace(fun t_multicall_sota_service_/1, Config,
@@ -390,9 +399,14 @@ t_multicall_sota_service(Config) ->
 
 t_multicall_sota_service_(_Config) ->
     Data = <<"abc">>,
-    Pids = [spawn_monitor(fun() ->
-				  exit({ok, call_sota_service_(N, Data)})
-			  end)
+    Svc = <<"/sota">>,
+    Params = [{<<"service_name">>, Svc},
+	      {<<"timeout">>, rvi_timeout(seconds, 10)},
+	      {<<"parameters">>, [{<<"data">>, Data}]}],
+    Pids = [spawn_monitor(
+	      fun() ->
+		      exit({ok, call_sota_service_(<<"/sota">>, N, Params)})
+	      end)
 	    || N <- [client1,
 		     client2,
 		     client3,
@@ -470,17 +484,12 @@ node_prefix_result(Res) ->
     proplists:get_value(<<"node_service_prefix">>,
 			proplists:get_value(<<"result">>, Res), []).
 
-call_sota_service_(RegName, Data) ->
-    call_sota_service_(<<"/sota">>, RegName, Data).
-
-call_sota_service_(Svc, RegName, Data) ->
+call_sota_service_(Svc, RegName, Params) ->
     ct:log("call_sota_service_(Svc = ~p,...)", [Svc]),
-    {Mega, Secs, _} = os:timestamp(),
-    Timeout = Mega * 1000000 + Secs + 60,
     register(RegName, self()),
     json_rpc_request(service_edge("backend"),
 		     <<"message">>,
-		     sota_args(Svc, Timeout, RegName, Data)),
+		     add_sendto(RegName, Params)),
     receive
 	{message, [{service_name, Svc},
 		   {data, Data} | T]} = Res ->
@@ -496,17 +505,20 @@ call_sota_service_(Svc, RegName, Data) ->
 	    error(timeout)
     end.
 
-call_sota_service_(Svc, RegName, Data, Files) ->
-    call_sota_service_(Svc, RegName, Data, [], Files).
+add_sendto(RegName, Params) ->
+    RegBin = atom_to_binary(RegName, latin1),
+    {_, Parameters} = lists:keyfind(<<"parameters">>, 1, Params),
+    lists:keyreplace(
+      <<"parameters">>, 1, Params,
+      {<<"parameters">>,
+       Parameters ++ [{<<"sendto">>, RegBin}]}).
 
-call_sota_service_(Svc, RegName, Data, XArgs, Files) ->
+call_sota_service_(Svc, RegName, Params, Files) ->
     ct:log("call_sota_service_(Svc = ~p,...)", [Svc]),
-    {Mega, Secs, _} = os:timestamp(),
-    Timeout = Mega * 1000000 + Secs + 60,
     register(RegName, self()),
     CallRes = json_rpc_request(service_edge("backend"),
 			       <<"message">>,
-			       sota_args(Svc, Timeout, RegName, XArgs, Data),
+			       add_sendto(RegName, Params),
 			       Files),
     ct:log("CallRes = ~p", [CallRes]),
     receive
@@ -521,21 +533,30 @@ call_sota_service_(Svc, RegName, Data, XArgs, Files) ->
 	    error(timeout)
     end.
 
-sota_args(Svc, Timeout, RegName, Data) ->
-    sota_args(Svc, Timeout, RegName, [], Data).
+%% sota_args(Svc, RegName, Opts) ->
+%%     ct:log("sota_args(~p, ~p, ~p)", [Svc, RegName, Opts]),
+%%     Timeout = proplists:get_value(timeout, Opts, default_timeout()),
+%%     Data = proplists:get_value(data, Opts, <<"the data">>),
+%%     XArgs = proplists:get_value(extra_args, Opts, []),
+%%     Synch = proplists:get_value(synch, Opts),
+%%     MsgSize = proplists:get_value(max_msg_size, Opts),
+%%     [{<<"service_name">>, join(<<"jlr.com/vin/abc">>, Svc)},
+%%      {<<"timeout">>, Timeout}]
+%% 	++
+%% 	[{<<"max_msg_size">>, MsgSize} || is_integer(MsgSize)]
+%% 	++
+%% 	[{<<"synch">>, Synch} || is_boolean(Synch)]
+%% 	++
+%% 	[{<<"parameters">>,
+%% 	  [{<<"data">>, Data},
+%% 	   {<<"sendto">>, atom_to_binary(RegName, latin1)}
+%% 	   | XArgs
+%% 	  ]}
+%% 	].
 
-sota_args(Svc, Timeout, RegName, XArgs, Data) ->
-    ct:log("sota_args(~p, ~p, ~p, ~p, ~p)", [Svc, Timeout, RegName,
-					     XArgs, Data]),
-    [{<<"service_name">>, join(<<"jlr.com/vin/abc">>, Svc)},
-     {<<"timeout">>, Timeout},
-     {<<"parameters">>,
-      [{<<"data">>, Data},
-       {<<"sendto">>, atom_to_binary(RegName, latin1)},
-       {<<"rvi.max_msg_size">>, 100}
-       | XArgs
-      ]}
-    ].
+rvi_timeout(seconds, Value) ->
+    {Mega, Secs, _} = os:timestamp(),
+    Mega * 1000000 + Secs + Value.
 
 join(Pfx, Name) ->
     re:replace(<<Pfx/binary, "/", Name/binary>>, "/+", "/",
@@ -691,13 +712,12 @@ handle_body_(Socket, _Request, Body, _St) ->
 	  [{<<"service_name">>, SvcName},
 	   {<<"parameters">>,
 	    [ {<<"data">>, Data},
-	      {<<"sendto">>, SendTo},
-	      {<<"rvi.max_msg_size">>, _} | T ]}
-	  ]}] ->
+	      {<<"sendto">>, SendTo} | _ ]}
+	   | T ] }] ->
 	    binary_to_existing_atom(SendTo, latin1)
 		! {message, [{service_name, SvcName},
 			     {data, Data} | T]},
-	    case lists:keymember(<<"rvi.synch">>, 1, T) of
+	    case lists:keymember(<<"synch">>, 1, T) of
 		true ->
 		    http_reply(Socket, ID, [{<<"status">>, 0},
 					    {<<"answer">>, <<"OK">>}]);
@@ -1158,28 +1178,72 @@ no_errors(Dirs, PDir) ->
     ct:log("Will check errors in ~p", [Dirs]),
     true = lists:all(
 	     fun(D) ->
-		     no_errors_(filename:join([PDir, D, "rvi_core",
-					       "log", "lager"]), D)
+		     LogDir = filename:join([PDir, D, "rvi_core", "log"]),
+		     no_errors_(filename:join([LogDir, "lager"]), D, LogDir)
 	     end, Dirs),
     ok.
 
-no_errors_(Dir, Name) ->
+no_errors_(Dir, Name, LogDir) ->
     lists:all(fun(F) ->
-		      log_is_empty(filename:join(Dir, F), F, Name)
+		      log_is_empty(filename:join(Dir, F), F, Name, LogDir)
 	      end, ["error.log", "crash.log"]).
 
-log_is_empty(Log, F, Name) ->
+log_is_empty(Log, F, Name, LogDir) ->
     case file:read_file(Log) of
 	{ok, <<>>} ->
 	    true;
 	{ok, Content} ->
 	    ct:log("~s: ~s is not empty:~n~s", [Name, F, Content]),
+	    print_context(Content, LogDir),
 	    false;
 	{error, Reason} ->
 	    ct:log("~s: Cannot read log ~s (~p)", [Name, Log, Reason]),
 	    false
     end.
 
+print_context(C, D) ->
+    case re:run(C, <<"\\d\\d\\d\\d-\\d\\d-\\d\\d"
+		     " \\d\\d:\\d\\d:\\d\\d\\.\\d\\d\\d">>,
+		[global, {capture, all, list}]) of
+	{match, Times} ->
+	    lists:foreach(
+	      fun(T) ->
+		      Cmd = lists:flatten(
+			      ["sh -c \"grep -A 10 -B 10 '", T, "' ",
+			       D, "/erlang.log.*\""]),
+		      ct:log("Cmd = ~s", [Cmd]),
+		      ct:log("--------------------------------~n"
+			     "~s~n"
+			     "--------------------------------",
+			     [get_stdout(exec:run(Cmd, [sync,stdout]))])
+	      end, Times);
+	_ ->
+	    ok
+    end.
+
+get_stdout({ok, [{stdout,S}]}) ->
+    Ls = re:split(S, "\r?\n", [{return,binary},trim]),
+    Sub = [maybe_bold(
+	     re:replace(L, "^.+/[^/]+/rvi_core/log/(.+$)", "\\1",
+			[{return,binary}]))
+	   || L <- Ls],
+    Int = intersperse(Sub, "\n"),
+    iolist_to_binary(Int);
+get_stdout(Other) ->
+    iolist_to_binary(io_lib:fwrite("~p", [Other])).
+
+maybe_bold(S) ->
+    case re:run(S, "\\[error\\]") of
+	{match, _} ->
+	    <<"<b>", S/binary, "</b>">>;
+	_ ->
+	    S
+    end.
+
+intersperse([], _) ->
+    [];
+intersperse([H|T], Int) ->
+    [H | [[Int, X] || X <- T]].
 
 with_trace(F, Config, File) ->
     Nodes = [N || {N,_} <- get_nodes()],

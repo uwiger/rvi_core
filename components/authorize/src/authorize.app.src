@@ -20,7 +20,7 @@
 		  public_key
                  ]},
   {mod, { authorize_app, []}},
-  {start_phases, [{ json_rpc, []}, {announce, []}]},
+  {start_phases, [{announce, []}]},
   {env, [
 	 {rvi_core_await, [{n,l,authorize}]}
 	]}

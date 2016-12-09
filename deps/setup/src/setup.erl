@@ -334,13 +334,45 @@ custom_private_env(A, Acc) ->
                     is_list(K)]).
 
 %% Wrapped for tracing purposes
-app_get_env(A, K) ->
-    application:get_env(A, K).
+app_get_env(A, K) when is_atom(K) ->
+    application:get_env(A, K);
+app_get_env(A, [H|T]) ->
+    case application:get_env(A, H) of
+        {ok, L} ->
+            get_env_sub(T, L);
+        Other ->
+            Other
+    end.
+
+get_env_sub([[]], _) ->
+    %% Leaf doesn't have a subtree
+    [];
+get_env_sub([], V) ->
+    %% Return the leaf value
+    {ok, V};
+get_env_sub([H|T], L) when is_list(L) ->
+    case lists:keyfind(H, 1, L) of
+        {_, Tree} ->
+            %% Recurse
+            get_env_sub(T, Tree);
+        {_, Val, _Tree} when T =:= [] ->
+            %% Return the leaf value
+            {ok, Val};
+        {_, _, Tree} when T =:= [[]] ->
+            %% Return the subtree
+            {ok, Tree};
+        {_, _, Tree} ->
+            %% Recurse into subtree
+            get_env_sub(T, Tree);
+        false ->
+            undefined
+    end.
+
 
 %% Wrapped for tracing purposes
 app_get_env(A, K, Default) ->
     %% Apparently, some still use setup on R15B ...
-    case application:get_env(A, K) of
+    case app_get_env(A, K) of
         {ok, Val} -> Val;
         _ ->
             Default

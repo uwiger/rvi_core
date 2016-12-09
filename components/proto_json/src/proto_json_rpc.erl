@@ -46,7 +46,7 @@ start_json_server() ->
 send_message(CompSpec,
 	     TID,
 	     ServiceName,
-	     Timeout,
+	     Opts,
 	     ProtoOpts,
 	     DataLinkMod,
 	     DataLinkOpts,
@@ -54,7 +54,7 @@ send_message(CompSpec,
     rvi_common:request(protocol, ?MODULE, send_message,
 		       [{ transaction_id, TID },
 			{ service, ServiceName },
-			{ timeout, Timeout },
+			{ options, Opts },
 			{ protocol_opts, ProtoOpts },
 			{ data_link_mod, DataLinkMod },
 			{ data_link_opts, DataLinkOpts },
@@ -75,7 +75,7 @@ handle_rpc(<<"send_message">>, Args) ->
     LogId = rvi_common:get_json_log_id(Args),
     {ok, TID} = rvi_common:get_json_element(["transaction_id"], Args),
     {ok, ServiceName} = rvi_common:get_json_element(["service_name"], Args),
-    {ok, Timeout} = rvi_common:get_json_element(["timeout"], Args),
+    {ok, Options} = rvi_common:get_json_element(["options"], Args),
     {ok, ProtoOpts} = rvi_common:get_json_element(["protocol_opts"], Args),
     {ok, DataLinkMod} = rvi_common:get_json_element(["data_link_mod"], Args),
     {ok, DataLinkOpts} = rvi_common:get_json_element(["data_link_opts"], Args),
@@ -83,7 +83,7 @@ handle_rpc(<<"send_message">>, Args) ->
     [ ok ] = gen_server:call(?SERVER, { rvi, send_message,
 					[TID,
 					 ServiceName,
-					 Timeout,
+					 Options,
 					 ProtoOpts,
 					 DataLinkMod,
 					 DataLinkOpts,
@@ -117,25 +117,24 @@ handle_notification(Other, _Args) ->
 handle_call({rvi, send_message,
 	     [TID,
 	      ServiceName,
-	      Timeout,
+	      MsgOpts,
 	      ProtoOpts,
 	      DataLinkMod,
 	      DataLinkOpts,
 	      Parameters | _LogId]}, _From, St) ->
     ?debug("    protocol:send(): transaction id:  ~p~n", [TID]),
     ?debug("    protocol:send(): service name:    ~p~n", [ServiceName]),
-    ?debug("    protocol:send(): timeout:         ~p~n", [Timeout]),
+    ?debug("    protocol:send(): msg_opts:        ~p~n", [MsgOpts]),
     ?debug("    protocol:send(): opts:            ~p~n", [ProtoOpts]),
     ?debug("    protocol:send(): data_link_mod:   ~p~n", [DataLinkMod]),
     ?debug("    protocol:send(): data_link_opts:  ~p~n", [DataLinkOpts]),
     ?debug("    protocol:send(): parameters:      ~p~n", [Parameters]),
     Data = [{ <<"service">>, ServiceName },
-	    { <<"timeout">>, Timeout },
+	    { <<"options">>, MsgOpts },
 	    { <<"parameters">>, Parameters }
 	   ],
-    RviOpts = rvi_common:rvi_options(Parameters),
     Res = DataLinkMod:send_data(
-	    St#st.cs, ?MODULE, ServiceName, RviOpts ++ DataLinkOpts, Data),
+	    St#st.cs, ?MODULE, ServiceName, DataLinkOpts, Data),
     {reply, Res, St};
 
 handle_call(Other, _From, St) ->
@@ -146,17 +145,17 @@ handle_call(Other, _From, St) ->
 handle_cast({rvi, receive_message, [Elems, IP, Port | _LogId]} = Msg, St) ->
     ?debug("~p:handle_cast(~p)", [?MODULE, Msg]),
 
-    [ ServiceName, Timeout, Parameters ] =
-	opts([<<"service">>, <<"timeout">>, <<"parameters">>],
+    [ ServiceName, MsgOpts, Parameters ] =
+	opts([<<"service">>, <<"options">>, <<"parameters">>],
 	     Elems, undefined),
 
     ?debug("    protocol:rcv(): service name:    ~p~n", [ServiceName]),
-    ?debug("    protocol:rcv(): timeout:         ~p~n", [Timeout]),
+    ?debug("    protocol:rcv(): msg_options:     ~p~n", [MsgOpts]),
     ?debug("    protocol:rcv(): remote IP/Port:  ~p~n", [{IP, Port}]),
     service_edge_rpc:handle_remote_message(St#st.cs,
 					   {IP, Port},
 					   ServiceName,
-					   Timeout,
+					   MsgOpts,
 					   Parameters),
     {noreply, St};
 
